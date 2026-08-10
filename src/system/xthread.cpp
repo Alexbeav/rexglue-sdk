@@ -11,6 +11,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstring>
 
 #include <fmt/format.h>
@@ -27,6 +29,7 @@
 #include <rex/runtime.h>
 #include <rex/stream.h>
 #include <rex/system/kernel_state.h>
+#include <rex/system/checkpoint.h>
 #include <rex/system/function_dispatcher.h>
 #include <rex/system/thread_state.h>
 #include <rex/system/user_module.h>
@@ -122,11 +125,92 @@ class ReenterException final {
   uint32_t address_;
 };
 
+struct CheckpointProbeState {
+  std::mutex mutex;
+  std::condition_variable condition;
+  std::atomic<bool> requested{false};
+  uint32_t target_thread_id = 0;
+  bool parked = false;
+  uint32_t guest_address = 0;
+  uint32_t guest_lr = 0;
+  uint32_t guest_stack_pointer = 0;
+};
+
+CheckpointProbeState checkpoint_probe;
+
 XThread* GetBoundCurrentXThread() {
   return current_xthread_tls_;
 }
 
 }  // namespace
+
+void PollCheckpointBoundary(PPCContext& context, uint32_t guest_address) {
+  if (!checkpoint_probe.requested.load(std::memory_order_acquire) || !XThread::IsInThread()) {
+    return;
+  }
+  auto* thread = XThread::GetCurrentThread();
+  std::unique_lock lock(checkpoint_probe.mutex);
+  if (!checkpoint_probe.requested.load(std::memory_order_relaxed) ||
+      checkpoint_probe.target_thread_id != thread->thread_id()) {
+    return;
+  }
+  checkpoint_probe.guest_address = guest_address;
+  checkpoint_probe.guest_lr = static_cast<uint32_t>(context.lr);
+  checkpoint_probe.guest_stack_pointer = context.r1.u32;
+  checkpoint_probe.parked = true;
+  checkpoint_probe.condition.notify_all();
+  checkpoint_probe.condition.wait(lock, [] {
+    return !checkpoint_probe.requested.load(std::memory_order_acquire);
+  });
+  checkpoint_probe.parked = false;
+  checkpoint_probe.condition.notify_all();
+}
+
+CheckpointProbeResult ProbeMainThreadCheckpoint(uint32_t timeout_ms) {
+  CheckpointProbeResult result;
+  auto* runtime = Runtime::instance();
+  if (!runtime || !runtime->kernel_state()) {
+    return result;
+  }
+
+  object_ref<XThread> target;
+  for (auto thread : runtime->kernel_state()->object_table()->GetObjectsByType<XThread>()) {
+    if (thread->is_guest_thread() && thread->main_thread() && thread->is_running()) {
+      target = thread;
+      break;
+    }
+  }
+  if (!target) {
+    return result;
+  }
+
+  std::unique_lock lock(checkpoint_probe.mutex);
+  if (checkpoint_probe.requested.load(std::memory_order_relaxed) || checkpoint_probe.parked) {
+    return result;
+  }
+  checkpoint_probe.target_thread_id = target->thread_id();
+  checkpoint_probe.guest_address = 0;
+  checkpoint_probe.guest_lr = 0;
+  checkpoint_probe.guest_stack_pointer = 0;
+  checkpoint_probe.requested.store(true, std::memory_order_release);
+  const bool reached = checkpoint_probe.condition.wait_for(
+      lock, std::chrono::milliseconds(timeout_ms), [] { return checkpoint_probe.parked; });
+  if (reached) {
+    result.reached = true;
+    result.thread_id = checkpoint_probe.target_thread_id;
+    result.guest_address = checkpoint_probe.guest_address;
+    result.guest_lr = checkpoint_probe.guest_lr;
+    result.guest_stack_pointer = checkpoint_probe.guest_stack_pointer;
+  }
+  checkpoint_probe.requested.store(false, std::memory_order_release);
+  checkpoint_probe.condition.notify_all();
+  if (reached) {
+    checkpoint_probe.condition.wait_for(
+        lock, std::chrono::milliseconds(timeout_ms), [] { return !checkpoint_probe.parked; });
+  }
+  checkpoint_probe.target_thread_id = 0;
+  return result;
+}
 
 bool XThread::IsInThread() {
   return GetBoundCurrentXThread() != nullptr;

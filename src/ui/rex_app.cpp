@@ -33,6 +33,7 @@
 #include <rex/system/achievement_manager.h>
 #include <rex/system/gpu_plugin.h>
 #include <rex/system/kernel_state.h>
+#include <rex/system/checkpoint.h>
 #include <rex/system/xthread.h>
 #include <rex/ui/graphics_provider.h>
 #include <rex/ui/keybinds.h>
@@ -42,12 +43,17 @@
 #include <imgui.h>
 
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <string_view>
 
 REXCVAR_DEFINE_STRING(gpu_plugin, "", "GPU",
                       "GPU emulation plugin to load at startup (e.g. 'xenos'); empty disables "
                       "GPU emulation")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
+REXCVAR_DEFINE_INT32(checkpoint_probe_after_ms, 0, "Debug",
+                     "Probe a guest checkpoint boundary after this startup delay; zero disables it")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 namespace rex {
@@ -407,6 +413,16 @@ void ReXApp::SetupOverlays(rex::ui::Presenter* presenter, rex::ui::ImmediateDraw
       settings_overlay_ = std::make_unique<ui::SettingsDialog>(imgui_drawer_.get(), config_path_);
     }
   });
+  rex::ui::RegisterBind("bind_checkpoint_probe", "F5", "Probe guest checkpoint boundary", [] {
+    const auto result = system::ProbeMainThreadCheckpoint();
+    if (result.reached) {
+      REXLOG_INFO("Checkpoint boundary reached: thread={} pc={:08X} lr={:08X} r1={:08X}",
+                  result.thread_id, result.guest_address, result.guest_lr,
+                  result.guest_stack_pointer);
+    } else {
+      REXLOG_WARN("Checkpoint boundary probe timed out");
+    }
+  });
   rex::ui::RegisterBind("bind_achievements", "F7", "Toggle achievements overlay", [this] {
     if (achievements_overlay_) {
       achievements_overlay_.reset();
@@ -458,6 +474,28 @@ void ReXApp::LaunchModule() {
 
     OnPostLaunchModule(main_thread.get());
     main_thread->Resume();
+
+    const int32_t checkpoint_probe_delay = REXCVAR_GET(checkpoint_probe_after_ms);
+    if (checkpoint_probe_delay > 0) {
+      checkpoint_probe_thread_ = std::jthread([this, checkpoint_probe_delay](std::stop_token stop) {
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::milliseconds(checkpoint_probe_delay);
+        while (!stop.stop_requested() && std::chrono::steady_clock::now() < deadline) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        if (stop.stop_requested() || shutting_down_.load(std::memory_order_acquire)) {
+          return;
+        }
+        const auto result = system::ProbeMainThreadCheckpoint();
+        if (result.reached) {
+          REXLOG_INFO("Checkpoint boundary reached: thread={} pc={:08X} lr={:08X} r1={:08X}",
+                      result.thread_id, result.guest_address, result.guest_lr,
+                      result.guest_stack_pointer);
+        } else {
+          REXLOG_WARN("Checkpoint boundary probe timed out");
+        }
+      });
+    }
 
     module_thread_ = std::thread([this, main_thread = std::move(main_thread)]() mutable {
       main_thread->Wait(0, 0, 0, nullptr);
@@ -548,10 +586,16 @@ void ReXApp::OnDestroy() {
   // Notify subclass before cleanup
   OnShutdown();
 
+  checkpoint_probe_thread_.request_stop();
+  if (checkpoint_probe_thread_.joinable()) {
+    checkpoint_probe_thread_.join();
+  }
+
   // Unregister overlay keybinds before destroying dialogs
   rex::ui::UnregisterBind("bind_debug_overlay");
   rex::ui::UnregisterBind("bind_console");
   rex::ui::UnregisterBind("bind_settings");
+  rex::ui::UnregisterBind("bind_checkpoint_probe");
   rex::ui::UnregisterBind("bind_achievements");
 
   // ImGui cleanup (reverse of setup)
