@@ -277,6 +277,12 @@ void KeSetCurrentStackPointers_entry(mapped_void stack_ptr, ppc_ptr_t<X_KTHREAD>
 
   UpdateGuestStackPointers(thread, pcr, context, stack_ptr.guest_address(),
                            stack_alloc_base.value(), stack_base.value(), stack_limit.value());
+
+  // This import completes a guest context switch. The restored link register
+  // is a new control-flow root, so the old recompiled C++ call stack is invalid.
+  if (thread->fiber_ptr && current_thread->guest_object() == thread.guest_address()) {
+    current_thread->Reenter(static_cast<uint32_t>(context->lr));
+  }
 }
 
 u32 KeSetAffinityThread_entry(mapped_void thread_ptr, u32 affinity,

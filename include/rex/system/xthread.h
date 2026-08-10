@@ -340,6 +340,7 @@ class XThread : public XObject {
   X_STATUS Terminate(int exit_code);
 
   virtual void Execute();
+  [[noreturn]] virtual void Reenter(uint32_t address);
 
   rex::thread::Fiber* main_fiber() const { return main_fiber_; }
   void set_main_fiber(rex::thread::Fiber* fiber) { main_fiber_ = fiber; }

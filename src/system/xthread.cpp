@@ -113,6 +113,15 @@ thread_local XThread* current_xthread_tls_ = nullptr;
 
 namespace {
 
+class ReenterException final {
+ public:
+  explicit ReenterException(uint32_t address) : address_(address) {}
+  uint32_t address() const { return address_; }
+
+ private:
+  uint32_t address_;
+};
+
 XThread* GetBoundCurrentXThread() {
   return current_xthread_tls_;
 }
@@ -609,12 +618,6 @@ void XThread::Execute() {
 
   auto* dispatcher = runtime->function_dispatcher();
   auto* memory = runtime->memory();
-  PPCFunc* func = dispatcher->GetFunction(address);
-  if (!func) {
-    REXSYS_ERROR("XThread::Execute - No function registered at {:08X}", address);
-    return;
-  }
-
   auto* ctx = thread_state_->context();
   uint8_t* base = memory->virtual_membase();
 
@@ -643,16 +646,42 @@ void XThread::Execute() {
   // when another fiber switches back to the main execution context.
   main_fiber_ = rex::thread::Fiber::ConvertCurrentThread();
 
-  // Execute the function
-  REXSYS_NOISY_DEBUG("XThread::Execute - Calling function at {:08X}", address);
-  func(*ctx, base);
+  uint32_t next_address = address;
+  bool nonlocal_dispatch = false;
+  while (next_address != 0) {
+    PPCFunc* func = dispatcher->GetFunction(next_address);
+    if (!func) {
+      REXSYS_ERROR("XThread::Execute - No function registered at reentry {:08X}", next_address);
+      return;
+    }
 
-  exit_code = static_cast<int>(ctx->r3.u32);
+    try {
+      REXSYS_NOISY_DEBUG("XThread::Execute - Calling function at {:08X}", next_address);
+      func(*ctx, base);
+      if (nonlocal_dispatch) {
+        // ReenterException unwinds the direct C++ call chain. A resumed
+        // fragment therefore returns to this dispatcher, not its former host
+        // caller. Continue at the guest LR until the rebuilt guest return
+        // chain reaches zero.
+        next_address = static_cast<uint32_t>(ctx->lr);
+        REXSYS_DEBUG("XThread::Execute - Guest return reentry at {:08X}", next_address);
+      } else {
+        next_address = 0;
+        exit_code = static_cast<int>(ctx->r3.u32);
+      }
+    } catch (const ReenterException& reentry) {
+      next_address = reentry.address();
+      nonlocal_dispatch = true;
+      REXSYS_DEBUG("XThread::Execute - Nonlocal reentry at {:08X}", next_address);
+    }
+  }
 
   // If we got here it means the execute completed without an exit being called.
   // Treat the return code as an implicit exit code (if desired).
   Exit(!want_exit_code ? 0 : exit_code);
 }
+
+[[noreturn]] void XThread::Reenter(uint32_t address) { throw ReenterException(address); }
 
 void XThread::EnterCriticalRegion() {
   guest_object<X_KTHREAD>()->apc_disable_count--;
