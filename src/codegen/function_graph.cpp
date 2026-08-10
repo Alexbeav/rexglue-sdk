@@ -1203,20 +1203,28 @@ TargetKind FunctionGraph::classifyTarget(uint32_t target, uint32_t callerAddr,
     return isCallInstruction ? TargetKind::Function : TargetKind::InternalLabel;
   }
 
-  // Case 3: Target is a DIFFERENT function's entry point - this is a call/tail-call
+  // Case 3: A non-link branch to a label discovered in the emitted function
+  // stays local. Parent-owned continuation chunks are also dispatcher entry
+  // points, but that registration must not turn a proven local branch into a
+  // tail call. A link branch still calls the registered entry point.
+  if (!isCallInstruction && callerFn && callerFn->isLabel(target)) {
+    return TargetKind::InternalLabel;
+  }
+
+  // Case 4: Target is a DIFFERENT function's entry point - this is a call/tail-call
   // This handles cases where a small thunk function branches to another function
   // whose entry point happens to fall within the thunk's address range
   if (isEntryPoint(target)) {
     return TargetKind::Function;
   }
 
-  // Case 4: Target is inside caller's function -> InternalLabel
+  // Case 5: Target is inside caller's function -> InternalLabel
   // For bl, this would be a rare PIC code pattern
   if (callerFn && callerFn->containsAddress(target)) {
     return TargetKind::InternalLabel;
   }
 
-  // Case 5: Unknown target
+  // Case 6: Unknown target
   return TargetKind::Unknown;
 }
 

@@ -4,6 +4,7 @@
 #include "ppc_config.h"
 #include <rex/ppc.h>
 #include <rex/logging.h>  // For REX_FATAL on unresolved calls
+#include <rex/system/checkpoint.h>
 
 // Forward declarations
 ## for func in functions
