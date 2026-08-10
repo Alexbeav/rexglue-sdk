@@ -146,17 +146,13 @@ void FunctionNode::addBlock(Block block) {
 }
 
 bool FunctionNode::containsAddress(uint32_t addr) const {
-  // First check overall bounds
-  if (addr < base_ || addr >= base_ + size_) {
-    return false;
-  }
-
-  // If no blocks defined, use linear range
+  // If no blocks are defined, use the declared linear range.
   if (blocks_.empty()) {
-    return true;
+    return addr >= base_ && addr < base_ + size_;
   }
 
-  // Check individual blocks
+  // A reentry chunk can branch backward into its parent. Its discovered blocks
+  // can therefore start before the chunk entry and its declared linear range.
   for (const auto& block : blocks_) {
     if (block.contains(addr)) {
       return true;
@@ -166,7 +162,7 @@ bool FunctionNode::containsAddress(uint32_t addr) const {
   // For CONFIG and PDATA functions, trust the declared size even if blocks don't cover it
   // This handles out-of-line switch cases where compiler places code after epilogue
   if (authority_ == FunctionAuthority::CONFIG || authority_ == FunctionAuthority::PDATA) {
-    return true;  // Already passed bounds check above
+    return addr >= base_ && addr < base_ + size_;
   }
 
   return false;

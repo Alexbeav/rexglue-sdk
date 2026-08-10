@@ -65,6 +65,8 @@ void discoverFunction(CodegenContext& ctx, uint32_t funcAddr,
 
   // Lookup pdataSize for exception handler boundary
   uint32_t pdataSize = 0;
+  uint32_t extentStart = 0;
+  std::unordered_set<uint32_t> discoveryFunctions = knownFunctions;
 
   // For CONFIG functions: use only the explicitly declared size (if any)
   // If no size specified (size=0), let discovery find natural boundaries via region
@@ -72,6 +74,25 @@ void discoverFunction(CodegenContext& ctx, uint32_t funcAddr,
   if (node->authority() == FunctionAuthority::CONFIG) {
     pdataSize = node->size();  // 0 if not specified, which is correct
     REXCODEGEN_TRACE("Analyze: 0x{:08X} is CONFIG, using declared size={}", funcAddr, pdataSize);
+
+    auto cfgIt = ctx.Config().functions.find(funcAddr);
+    if (cfgIt != ctx.Config().functions.end() && cfgIt->second.isChunk()) {
+      extentStart = cfgIt->second.parent;
+      if (auto* parent = graph.getFunction(extentStart)) {
+        pdataSize = parent->size();
+      }
+
+      // PDATA defines this complete parent extent. Any provisional entry in
+      // that range is an internal label for a reentry scan, not a tail call.
+      if (pdataSize > 0) {
+        std::erase_if(discoveryFunctions, [&](uint32_t address) {
+          return address >= extentStart && address < extentStart + pdataSize;
+        });
+      }
+      REXCODEGEN_TRACE(
+          "Analyze: chunk 0x{:08X} uses parent extent 0x{:08X}+0x{:X}", funcAddr,
+          extentStart, pdataSize);
+    }
   } else {
     // For non-CONFIG functions, use PDATA size if available
     auto pdataIt = ctx.scan.pdataSizes.find(funcAddr);
@@ -95,8 +116,8 @@ void discoverFunction(CodegenContext& ctx, uint32_t funcAddr,
   }
 
   // Pass pdataSize so forward branches within function extent are correctly identified
-  auto result = discoverBlocks(decoded, funcAddr, *region, knownFunctions, pdataSize,
-                               &ctx.Config().switchTables);
+  auto result = discoverBlocks(decoded, funcAddr, *region, discoveryFunctions, pdataSize,
+                               &ctx.Config().switchTables, extentStart);
 
   if (result.blocks.empty()) {
     REXCODEGEN_WARN("Analyze: no blocks found for function 0x{:08X}", funcAddr);

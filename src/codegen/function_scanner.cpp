@@ -1815,14 +1815,16 @@ std::optional<JumpTable> detectJumpTable(DecodedBinary& decoded, uint32_t bctrAd
 BlockDiscoveryResult discoverBlocks(
     DecodedBinary& decoded, uint32_t entryPoint, const CodeRegion& containingRegion,
     const std::unordered_set<uint32_t>& knownFunctions, uint32_t pdataSize,
-    const std::unordered_map<uint32_t, JumpTable>* manualSwitchTables) {
+    const std::unordered_map<uint32_t, JumpTable>* manualSwitchTables, uint32_t extentStart) {
   BlockDiscoveryResult result;
   std::unordered_set<uint32_t> visited;
   std::unordered_set<uint32_t> blockStarts;
   std::queue<uint32_t> worklist;
 
-  // Function extent - use pdataSize when available
-  uint32_t funcEnd = (pdataSize > 0) ? (entryPoint + pdataSize) : containingRegion.end;
+  // A chunk can enter in the middle of its parent and branch to an earlier
+  // parent label. Use the parent extent for that case.
+  uint32_t funcStart = extentStart != 0 ? extentStart : entryPoint;
+  uint32_t funcEnd = (pdataSize > 0) ? (funcStart + pdataSize) : containingRegion.end;
 
   REXCODEGEN_TRACE(
       "discoverBlocks: entry=0x{:08X} pdataSize={} funcEnd=0x{:08X} region=[0x{:08X}-0x{:08X}]",
@@ -1830,7 +1832,7 @@ BlockDiscoveryResult discoverBlocks(
 
   // Helper to check if address is within function bounds
   auto isWithinFunction = [&](uint32_t addr) -> bool {
-    return addr >= entryPoint && addr < funcEnd;
+    return addr >= funcStart && addr < funcEnd;
   };
 
   // Start with entry point
@@ -1873,7 +1875,7 @@ BlockDiscoveryResult discoverBlocks(
         // Uses funcEnd (from pdataSize or region) defined at top of function
         auto isInternalTarget = [&](uint32_t t) -> bool {
           // Must be within function bounds
-          if (t < entryPoint || t >= funcEnd) {
+          if (t < funcStart || t >= funcEnd) {
             return false;
           }
           // Must not be a known function entry (except our own entry point)
@@ -1935,7 +1937,7 @@ BlockDiscoveryResult discoverBlocks(
             }
           }
           if (!jt) {
-            jt = detectJumpTable(decoded, addr, containingRegion, entryPoint, funcEnd);
+            jt = detectJumpTable(decoded, addr, containingRegion, funcStart, funcEnd);
           }
           if (jt) {
             REXCODEGEN_TRACE("discoverBlocks: detected jump table at bctr 0x{:08X} with {} targets",
