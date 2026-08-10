@@ -464,6 +464,19 @@ std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
     }
   }
 
+  // A reentry chunk can reach blocks before its configured entry. Blocks are
+  // emitted in address order, so jump over those blocks on initial entry.
+  const bool hasEarlierBlock =
+      std::any_of(blocks().begin(), blocks().end(),
+                  [&](const Block& block) { return block.base < base(); });
+  const bool containsEntry =
+      std::any_of(blocks().begin(), blocks().end(),
+                  [&](const Block& block) { return block.contains(base()); });
+  const bool needsEntryJump = hasEarlierBlock && containsEntry;
+  if (needsEntryJump) {
+    labels.emplace(base());
+  }
+
   // --- Function name ---
   std::string name;
   if (base() == ctx.entryPoint) {
@@ -489,6 +502,10 @@ std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
 
   std::string body;
   body.reserve(4096);
+
+  if (needsEntryJump) {
+    emit_println(body, "\tgoto loc_{:X};", base());
+  }
 
   ppc_insn insn;
   std::unordered_set<size_t> emittedLabels;
