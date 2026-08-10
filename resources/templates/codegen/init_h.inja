@@ -317,5 +317,5 @@ inline std::atomic<i32>& ppc_global_lock_count_() {
 // Function Declarations
 //=============================================================================
 
-{% for fn in functions %}DECLARE_REX_FUNC({{ fn.name }});
-{% endfor %}
+{% for fn in functions %}{% if include_all_function_declarations or fn.is_import or fn.is_rexcrt %}DECLARE_REX_FUNC({{ fn.name }});
+{% endif %}{% endfor %}

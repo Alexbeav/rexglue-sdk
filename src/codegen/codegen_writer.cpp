@@ -13,9 +13,12 @@
 #include "codegen_flags.h"
 
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
+#include <set>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 #include <fmt/format.h>
 #include <inja/inja.hpp>
@@ -101,6 +104,7 @@ nlohmann::json buildTemplateData(const rex::codegen::CodegenContext& ctx,
       {"config_flags", configFlags},
       {"functions", functionsJson},
       {"recomp_files", nlohmann::json::array()},
+      {"include_all_function_declarations", true},
   };
 }
 
@@ -194,11 +198,23 @@ bool CodegenWriter::write(bool force) {
     registry.loadOverrides(config().templateDir);
 
   auto tmplData = buildTemplateData(ctx_, functions, rexcrtByAddr);
+  std::unordered_set<std::string> knownFunctionNames;
+  knownFunctionNames.reserve(tmplData["functions"].size());
+  for (const auto& functionData : tmplData["functions"])
+    knownFunctionNames.insert(functionData["name"].get<std::string>());
 
   // Generate {project}_init.h (self-contained: config + declarations + macros)
   REXCODEGEN_TRACE("Recompile: generating {}_init.h", projectName);
   out = renderWithJson(registry, "codegen/init_h", tmplData);
   SaveCurrentOutData(fmt::format("{}_init.h", projectName));
+
+  // Generated recompilation units need stable macros and import declarations,
+  // but a new function must not invalidate every unit through this header.
+  REXCODEGEN_TRACE("Recompile: generating {}_recomp.h", projectName);
+  tmplData["include_all_function_declarations"] = false;
+  out = renderWithJson(registry, "codegen/init_h", tmplData);
+  SaveCurrentOutData(fmt::format("{}_recomp.h", projectName));
+  tmplData["include_all_function_declarations"] = true;
 
   // Generate {project}_init.cpp (PPCImageConfig + PPCFuncMappings)
   REXCODEGEN_TRACE("Recompile: generating {}_init.cpp", projectName);
@@ -225,30 +241,114 @@ bool CodegenWriter::write(bool force) {
   if (runtime_)
     emitCtx.resolver = runtime_->export_resolver();
 
-  // Generate recomp files with size-based splitting
+  // Generate recomp files in stable guest-address shards. Size-only splitting
+  // moves every later function when one entry is inserted. Stable shards keep
+  // that invalidation inside one bounded guest address span.
   REXCODEGEN_TRACE("Recompiling {} functions...", functions.size());
+  struct PendingFunction {
+    const FunctionNode* function;
+    std::string code;
+  };
+  std::vector<PendingFunction> pendingFunctions;
   size_t currentFileBytes = 0;
-  println("#include \"{}_init.h\"\n", projectName);
+  uint32_t currentShardBase = 0;
+  size_t currentShardPart = 0;
+  bool hasShard = false;
 
-  for (size_t i = 0; i < functions.size(); i++) {
-    std::string code = functions[i]->emitCpp(emitCtx);
+  auto emittedFunctionName = [&](const FunctionNode* function) {
+    if (function->base() == emitCtx.entryPoint)
+      return std::string("xstart");
+    if (!function->name().empty())
+      return function->name();
+    return fmt::format("sub_{:08X}", function->base());
+  };
 
-    if (currentFileBytes > 0 && currentFileBytes + code.size() > REXCVAR_GET(max_file_size_bytes)) {
-      SaveCurrentOutData();
-      println("#include \"{}_init.h\"\n", projectName);
-      currentFileBytes = 0;
+  auto flushRecompUnit = [&]() {
+    if (pendingFunctions.empty())
+      return;
+    std::set<std::string> declarations;
+    auto collectTarget = [&](const CallTarget& target) {
+      if (target.isFunction()) {
+        const auto* targetFunction = target.asFunction();
+        if (targetFunction)
+          declarations.insert(emittedFunctionName(targetFunction));
+      }
+    };
+    for (const auto& pending : pendingFunctions) {
+      declarations.insert(emittedFunctionName(pending.function));
+      for (const auto& edge : pending.function->calls())
+        collectTarget(edge.target);
+      for (const auto& edge : pending.function->tailCalls())
+        collectTarget(edge.target);
+
+      // Some direct calls are created during emission. Late jump tables and
+      // exception handlers do not exist in the stored call-edge lists.
+      std::string_view code = pending.code;
+      constexpr std::string_view callSuffix = "(ctx, base)";
+      size_t position = 0;
+      while ((position = code.find(callSuffix, position)) != std::string_view::npos) {
+        size_t start = position;
+        while (start > 0) {
+          const char value = code[start - 1];
+          if (!(std::isalnum(static_cast<unsigned char>(value)) || value == '_'))
+            break;
+          --start;
+        }
+        if (start < position) {
+          std::string name(code.substr(start, position - start));
+          if (knownFunctionNames.contains(name))
+            declarations.insert(std::move(name));
+        }
+        position += callSuffix.size();
+      }
+    }
+
+    println("#include \"{}_recomp.h\"\n", projectName);
+    for (const auto& declaration : declarations)
+      println("DECLARE_REX_FUNC({});", declaration);
+    if (!declarations.empty())
+      println("");
+    for (auto& pending : pendingFunctions) {
+      out += pending.code;
+      std::string().swap(pending.code);
+    }
+
+    auto filename = fmt::format("{}_recomp.{:08X}.{}.cpp", projectName, currentShardBase,
+                                currentShardPart);
+    recompFiles_.push_back(filename);
+    SaveCurrentOutData(filename);
+    FlushPendingWrites();
+    pendingFunctions.clear();
+    currentFileBytes = 0;
+  };
+
+  const uint32_t addressShardBytes = REXCVAR_GET(stable_address_shard_bytes);
+  for (const auto* function : functions) {
+    std::string code = function->emitCpp(emitCtx);
+    const uint32_t shardBase =
+        static_cast<uint32_t>((function->base() / addressShardBytes) * addressShardBytes);
+    const bool newAddressShard = !hasShard || shardBase != currentShardBase;
+    const bool sizeSplit = !pendingFunctions.empty() &&
+                           currentFileBytes + code.size() > REXCVAR_GET(max_file_size_bytes);
+    if (newAddressShard || sizeSplit) {
+      flushRecompUnit();
+      if (newAddressShard) {
+        currentShardBase = shardBase;
+        currentShardPart = 0;
+        hasShard = true;
+      } else {
+        ++currentShardPart;
+      }
     }
 
     if (code.size() > REXCVAR_GET(max_file_size_bytes)) {
       REXCODEGEN_WARN("Function 0x{:08X} is {} bytes, exceeds max_file_size_bytes ({})",
-                      functions[i]->base(), code.size(), REXCVAR_GET(max_file_size_bytes));
+                      function->base(), code.size(), REXCVAR_GET(max_file_size_bytes));
     }
-
-    out += code;
     currentFileBytes += code.size();
+    pendingFunctions.push_back({function, std::move(code)});
   }
-
-  SaveCurrentOutData();
+  flushRecompUnit();
   REXCODEGEN_TRACE("Recompilation complete.");
 
   // Generate sources.cmake
@@ -256,9 +356,8 @@ bool CodegenWriter::write(bool force) {
   {
     auto& recompFiles = tmplData["recomp_files"];
     recompFiles = nlohmann::json::array();
-    for (size_t i = 0; i < cppFileIndex; ++i) {
-      recompFiles.push_back(fmt::format("{}_recomp.{}.cpp", projectName, i));
-    }
+    for (const auto& filename : recompFiles_)
+      recompFiles.push_back(filename);
     out = renderWithJson(registry, "codegen/sources_cmake", tmplData);
     SaveCurrentOutData("sources.cmake");
   }

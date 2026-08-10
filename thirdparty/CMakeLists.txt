@@ -280,6 +280,11 @@ endif()
 
 add_subdirectory(sdl3)
 
+if(WIN32 AND CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    # The UCRT exports _itoa. SDL uses the non-prefixed spelling.
+    target_compile_definitions(SDL3-static PRIVATE itoa=_itoa)
+endif()
+
 #=============================================================================
 # DXC API headers (vendored from DirectXShaderCompiler, runtime-loaded)
 #=============================================================================
@@ -356,6 +361,8 @@ if(REXGLUE_ENABLE_TRACY)
 
     if(WIN32 AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         target_link_libraries(TracyClient PUBLIC ws2_32 dbghelp)
+        # The UCRT exports _fileno. Tracy uses the POSIX spelling.
+        target_compile_definitions(TracyClient PRIVATE fileno=_fileno)
     endif()
 
     target_compile_definitions(TracyClient
@@ -543,6 +550,10 @@ target_compile_definitions(libavutil PRIVATE ${FFMPEG_COMMON_DEFINES})
 target_compile_options(libavutil PRIVATE -w)  # Suppress warnings in third-party code
 if(WIN32)
     target_link_libraries(libavutil PRIVATE bcrypt)
+    if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        # The UCRT exports _isatty. FFmpeg uses the POSIX spelling.
+        target_compile_definitions(libavutil PRIVATE isatty=_isatty)
+    endif()
 endif()
 
 # libavcodec - FFmpeg codec library (depends on libavutil)

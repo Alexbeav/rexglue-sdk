@@ -22,6 +22,11 @@ REXCVAR_DEFINE_UINT32(max_file_size_bytes, 2097152, "Codegen",
     .lifecycle(rex::cvar::Lifecycle::kInitOnly)
     .range(65536, 67108864);
 
+REXCVAR_DEFINE_UINT32(stable_address_shard_bytes, 65536, "Codegen",
+                      "Guest address span for stable generated source shards")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly)
+    .range(4096, 16777216);
+
 REXCVAR_DEFINE_UINT32(progress_log_frequency, 100, "Codegen",
                       "Log progress every N functions")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly)
