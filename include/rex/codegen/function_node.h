@@ -98,6 +98,10 @@ class FunctionNode {
   /// For normal functions: emits REX_FUNC with blocks and instructions
   std::string emitCpp(const EmitContext& ctx) const;
 
+  /// Return configured continuation entries that can use this compiled body.
+  std::vector<std::pair<uint32_t, std::string>> parentBackedAliases(
+      const EmitContext& ctx) const;
+
   //=========================================================================
   // Instruction access (valid after discover)
   //=========================================================================
@@ -107,7 +111,16 @@ class FunctionNode {
 
   // Blocks
   const std::vector<Block>& blocks() const { return blocks_; }
+  bool containsBlockAddress(uint32_t addr) const;
   bool containsAddress(uint32_t addr) const;
+  bool containsEmittedAddress(uint32_t addr) const {
+    for (const auto& block : blocks_) {
+      if (block.contains(addr)) {
+        return true;
+      }
+    }
+    return false;
+  }
 
   // Check if address is within overall function bounds (ignores blocks)
   // Use this for branch target detection where address may be in a gap between blocks

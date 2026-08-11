@@ -33,6 +33,10 @@
 // Forward declaration of the PPC execution context
 struct PPCContext;
 
+namespace rex::runtime {
+[[noreturn]] void ReenterGuestFunction(uint32_t address);
+}
+
 // Function signature for recompiled PPC functions
 using PPCFunc = void(PPCContext& ctx, uint8_t* base);
 
@@ -305,6 +309,25 @@ struct alignas(0x40) PPCContext {
    * to a local variable via REX_CONFIG_CTR_AS_LOCAL.
    */
   uint32_t last_indirect_target = 0;
+  uint32_t last_indirect_caller = 0;
+  uint32_t last_indirect_callsite = 0;
+  uint32_t last_indirect_r3 = 0;
+  uint32_t last_indirect_r4 = 0;
+  uint32_t last_dispatch_target = 0;
+  uint32_t last_dispatch_kind = 0;
+  uint32_t last_dispatch_arg_count = 0;
+  uint32_t last_dispatch_r3 = 0;
+  uint32_t last_dispatch_r4 = 0;
+  struct IndirectTraceEntry {
+    uint32_t target;
+    uint32_t caller;
+    uint32_t callsite;
+    uint32_t r3;
+    uint32_t r4;
+  };
+  static constexpr uint32_t kIndirectTraceCapacity = 16;
+  IndirectTraceEntry indirect_trace[kIndirectTraceCapacity]{};
+  uint32_t indirect_trace_index = 0;
 
   PPCRegister f0;
   PPCRegister f1;
@@ -494,4 +517,39 @@ struct alignas(0x40) PPCContext {
     src += 18 * sizeof(PPCVRegister);
     std::memcpy(&v64, src, 64 * sizeof(PPCVRegister));
   }
+
+  /** Current recompiled guest function. Used only for crash diagnostics. */
+  volatile uint32_t current_function = 0;
+
+  /** Last guest memory instruction. Used only for crash diagnostics. */
+  volatile uint32_t current_instruction = 0;
+
+  /** Selected guest-memory range for filtered write provenance. */
+  uint32_t memory_trace_address = 0;
+  uint32_t memory_trace_length = 0;
+};
+
+/** Keep current_function correct across nested guest calls. */
+struct PPCFunctionScope {
+  volatile uint32_t& function_marker;
+  volatile uint32_t& instruction_marker;
+  uint32_t previous_function;
+  uint32_t previous_instruction;
+
+  PPCFunctionScope(PPCContext& ctx, uint32_t address)
+      : function_marker(ctx.current_function),
+        instruction_marker(ctx.current_instruction),
+        previous_function(function_marker),
+        previous_instruction(instruction_marker) {
+    function_marker = address;
+    instruction_marker = address;
+  }
+
+  ~PPCFunctionScope() {
+    instruction_marker = previous_instruction;
+    function_marker = previous_function;
+  }
+
+  PPCFunctionScope(const PPCFunctionScope&) = delete;
+  PPCFunctionScope& operator=(const PPCFunctionScope&) = delete;
 };

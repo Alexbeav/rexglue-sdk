@@ -152,6 +152,17 @@ void ProgressView::phaseChanged(std::string_view name) {
   renderActiveLine();
 }
 
+void ProgressView::phaseFinished(std::string_view name, std::chrono::milliseconds elapsed) {
+  std::lock_guard lock(state_mutex_);
+  if (current_module_ >= modules_.size())
+    return;
+  if (!tty_) {
+    detail::GlobalSinkAccessor acc;
+    acc.writeLine(fmt::format("  timing {}: {} {:.3f}s", modules_[current_module_].name, name,
+                              elapsed.count() / 1000.0));
+  }
+}
+
 void ProgressView::moduleFinished(std::chrono::milliseconds elapsed) {
   std::lock_guard lock(state_mutex_);
   if (current_module_ >= modules_.size())

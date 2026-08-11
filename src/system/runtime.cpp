@@ -9,6 +9,8 @@
  *              See LICENSE file in the project root for full license text.
  */
 
+#include <fmt/format.h>
+
 #include <rex/chrono/clock.h>
 #include <rex/cvar.h>
 #include <rex/filesystem/devices/host_path_device.h>
@@ -315,6 +317,27 @@ bool Runtime::SetupVfs() {
   file_system_->RegisterSymbolicLink("game:", mount_path);
   file_system_->RegisterSymbolicLink("d:", mount_path);
   REXSYS_DEBUG("  Registered symbolic links: game:, d:");
+
+  // Mount the signed-in user's profile directory as <xuid>:\ so titles that
+  // open their save container by the profile's offline XUID (e.g. Forza
+  // Horizon reading B13EBABEBABEBABE:\ForzaProfile) resolve to a writable host
+  // folder. Mirrors Xenia's ProfileManager::MountProfile.
+  {
+    uint64_t xuid = kernel_state_->user_profile()->xuid();
+    auto xuid_name = fmt::format("{:016X}", xuid);
+    auto profile_root = std::filesystem::absolute(user_data_root_) / "profiles" / xuid_name;
+    std::error_code ec;
+    std::filesystem::create_directories(profile_root, ec);
+    auto profile_mount = std::string("\\Device\\Profile\\") + xuid_name;
+    auto profile_device = std::make_unique<rex::filesystem::HostPathDevice>(
+        profile_mount, profile_root, false /* writable */);
+    if (profile_device->Initialize() && file_system_->RegisterDevice(std::move(profile_device))) {
+      file_system_->RegisterSymbolicLink(xuid_name + ":", profile_mount);
+      REXSYS_INFO("  Mounted profile at {}:  ({})", xuid_name, profile_root.string());
+    } else {
+      REXSYS_WARN("  Failed to mount profile device {}:", xuid_name);
+    }
+  }
 
   // Mount update_data_root as update:\ if provided
   if (!update_data_root_.empty()) {

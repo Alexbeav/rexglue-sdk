@@ -12,6 +12,7 @@
 #include "decoded_binary.h"
 
 #include <algorithm>
+#include <chrono>
 #include <map>
 
 #include <rex/codegen/analysis_errors.h>
@@ -26,30 +27,43 @@ namespace rex::codegen {
 Result<void> Analyze(CodegenContext& ctx, ProgressReporter* reporter) {
   REXCODEGEN_TRACE("Analyze: starting analysis...");
 
+  auto phaseStarted = std::chrono::steady_clock::now();
+  if (reporter)
+    reporter->phaseChanged("Decode");
   ctx.initDecoded();
+  if (reporter) {
+    reporter->phaseFinished("Decode", std::chrono::duration_cast<std::chrono::milliseconds>(
+                                          std::chrono::steady_clock::now() - phaseStarted));
+  }
   REXCODEGEN_TRACE("Analyze: decoded {} instructions across {} code regions",
                    ctx.decoded().instructionCount(), ctx.decoded().codeRegions().size());
 
+  auto runPhase = [&](std::string_view name, auto&& action) -> Result<void> {
+    if (reporter)
+      reporter->phaseChanged(name);
+    const auto started = std::chrono::steady_clock::now();
+    auto result = action();
+    if (reporter) {
+      reporter->phaseFinished(name, std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        std::chrono::steady_clock::now() - started));
+    }
+    return result;
+  };
+
   // 1. Register entry points (imports, helpers, config, pdata)
-  if (reporter)
-    reporter->phaseChanged("Register");
-  auto regResult = phases::Register(ctx, reporter);
+  auto regResult = runPhase("Register", [&] { return phases::Register(ctx, reporter); });
   if (!regResult) {
     return regResult;
   }
 
   // 2. Scan binary into code/data regions
-  if (reporter)
-    reporter->phaseChanged("Scan");
-  auto scanResult = phases::Scan(ctx, reporter);
+  auto scanResult = runPhase("Scan", [&] { return phases::Scan(ctx, reporter); });
   if (!scanResult) {
     return scanResult;
   }
 
   // 3. Discover function blocks iteratively (includes vtable scan)
-  if (reporter)
-    reporter->phaseChanged("Discover");
-  auto discoverResult = phases::Discover(ctx, reporter);
+  auto discoverResult = runPhase("Discover", [&] { return phases::Discover(ctx, reporter); });
   if (!discoverResult) {
     return discoverResult;
   }
@@ -59,25 +73,19 @@ Result<void> Analyze(CodegenContext& ctx, ProgressReporter* reporter) {
   // functionPointerScan(ctx);
 
   // 4. Gap fill uncovered regions + discover blocks for gap-filled functions + cleanup
-  if (reporter)
-    reporter->phaseChanged("GapFill");
-  auto gapFillResult = phases::GapFill(ctx, reporter);
+  auto gapFillResult = runPhase("GapFill", [&] { return phases::GapFill(ctx, reporter); });
   if (!gapFillResult) {
     return gapFillResult;
   }
 
   // 5. Merge: resolve jumps and seal functions
-  if (reporter)
-    reporter->phaseChanged("Merge");
-  auto mergeResult = phases::Merge(ctx, reporter);
+  auto mergeResult = runPhase("Merge", [&] { return phases::Merge(ctx, reporter); });
   if (!mergeResult) {
     return mergeResult;
   }
 
   // 6. Validate
-  if (reporter)
-    reporter->phaseChanged("Validate");
-  auto validateResult = phases::Validate(ctx, reporter);
+  auto validateResult = runPhase("Validate", [&] { return phases::Validate(ctx, reporter); });
   if (!validateResult) {
     return validateResult;
   }

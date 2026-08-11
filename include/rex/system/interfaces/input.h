@@ -20,6 +20,14 @@ class IInputSystem {
   virtual ~IInputSystem() = default;
   virtual X_STATUS Setup() = 0;
   virtual void Shutdown() = 0;
+
+  // Consume mouse movement before controller-stick conversion clamps it.
+  // The default keeps custom input backends source-compatible.
+  virtual bool ConsumeRawMouseDelta(int32_t& delta_x, int32_t& delta_y) {
+    delta_x = 0;
+    delta_y = 0;
+    return false;
+  }
 };
 
 }  // namespace rex::system

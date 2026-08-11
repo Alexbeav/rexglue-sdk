@@ -11,6 +11,9 @@
 
 #include "ppc/instruction.h"
 
+#include <algorithm>
+#include <chrono>
+#include <limits>
 #include <unordered_set>
 
 #include <rex/codegen/phases.h>
@@ -178,37 +181,55 @@ void gapFillCodeRegions(CodegenContext& ctx) {
 
 void cleanupAbsorbedGapFills(CodegenContext& ctx) {
   auto& graph = ctx.graph;
-  std::vector<uint32_t> toRemove;
+  std::vector<uint32_t> gapAddresses;
 
   for (const auto& [addr, node] : graph.functions()) {
-    if (node->authority() != FunctionAuthority::GAP_FILL)
+    if (node->authority() == FunctionAuthority::GAP_FILL) {
+      gapAddresses.push_back(addr);
+    }
+  }
+  std::sort(gapAddresses.begin(), gapAddresses.end());
+
+  std::unordered_set<uint32_t> absorbed;
+  for (const auto& [otherAddr, otherNode] : graph.functions()) {
+    uint32_t extentStart = std::numeric_limits<uint32_t>::max();
+    uint32_t extentEnd = 0;
+
+    for (const auto& block : otherNode->blocks()) {
+      extentStart = std::min(extentStart, block.base);
+      extentEnd = std::max(extentEnd, block.end());
+    }
+
+    if (otherNode->blocks().empty() || otherNode->authority() == FunctionAuthority::CONFIG ||
+        otherNode->authority() == FunctionAuthority::PDATA) {
+      extentStart = std::min(extentStart, otherNode->base());
+      extentEnd = std::max(extentEnd, otherNode->end());
+    }
+
+    if (extentStart >= extentEnd) {
       continue;
+    }
 
-    for (const auto& [otherAddr, otherNode] : graph.functions()) {
-      if (otherAddr == addr)
+    auto gap = std::lower_bound(gapAddresses.begin(), gapAddresses.end(), extentStart);
+    for (; gap != gapAddresses.end() && *gap < extentEnd; ++gap) {
+      if (*gap == otherAddr || !otherNode->containsAddress(*gap)) {
         continue;
-      if (!otherNode->containsAddress(addr))
-        continue;
+      }
 
-      // This GAP_FILL is inside another function's blocks
-      if (otherNode->authority() != FunctionAuthority::GAP_FILL) {
-        // Absorbed by higher authority - remove
-        toRemove.push_back(addr);
-        break;
-      } else if (otherAddr < addr) {
-        // Both GAP_FILL, other has lower address - it survives
-        toRemove.push_back(addr);
-        break;
+      if (otherNode->authority() != FunctionAuthority::GAP_FILL || otherAddr < *gap) {
+        absorbed.insert(*gap);
       }
     }
   }
 
-  for (uint32_t addr : toRemove) {
-    graph.removeFunction(addr);
+  for (uint32_t addr : gapAddresses) {
+    if (absorbed.contains(addr)) {
+      graph.removeFunction(addr);
+    }
   }
 
-  if (!toRemove.empty()) {
-    REXCODEGEN_TRACE("Analyze: removed {} absorbed GAP_FILL functions", toRemove.size());
+  if (!absorbed.empty()) {
+    REXCODEGEN_TRACE("Analyze: removed {} absorbed GAP_FILL functions", absorbed.size());
   }
 }
 
@@ -217,15 +238,31 @@ void cleanupAbsorbedGapFills(CodegenContext& ctx) {
 namespace phases {
 
 VoidResult GapFill(CodegenContext& ctx, ProgressReporter* reporter) {
-  (void)reporter;
+  auto started = std::chrono::steady_clock::now();
   gapFillCodeRegions(ctx);
+  if (reporter) {
+    reporter->phaseFinished("GapFill.Scan", std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                std::chrono::steady_clock::now() - started));
+  }
 
   // Discover blocks for gap-filled functions
+  started = std::chrono::steady_clock::now();
   auto known = buildKnownFunctions(ctx.graph, /*excludeGapFill=*/true);
   size_t discovered = discoverPendingFunctions(ctx, known);
   REXCODEGEN_TRACE("Analyze: discovered blocks for {} gap-filled functions", discovered);
+  if (reporter) {
+    reporter->phaseFinished("GapFill.Discover",
+                            std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - started));
+  }
 
+  started = std::chrono::steady_clock::now();
   cleanupAbsorbedGapFills(ctx);
+  if (reporter) {
+    reporter->phaseFinished("GapFill.Cleanup",
+                            std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - started));
+  }
 
   return Ok();
 }

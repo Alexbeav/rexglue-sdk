@@ -20,6 +20,11 @@ REXCVAR_DEFINE_BOOL(allow_game_relative_writes, false, "Filesystem",
                     "relative to game://. Used for "
                     "generating test data to compare with original hardware.");
 
+REXCVAR_DEFINE_STRING(default_device, "game:\\", "Filesystem",
+                      "Device used to resolve device-less (relative) guest paths, "
+                      "mirroring a disc-launched title's current directory. "
+                      "Empty disables relative-path rebasing.");
+
 namespace rex::filesystem {
 
 VirtualFileSystem::VirtualFileSystem() {}
@@ -116,9 +121,38 @@ Entry* VirtualFileSystem::ResolvePath(const std::string_view path) {
   }
 
   // Find the device.
-  auto it = std::find_if(devices_.cbegin(), devices_.cend(), [&](const auto& d) {
-    return rex::string::utf8_starts_with_case(normalized_path, d->mount_path());
-  });
+  auto find_device = [&](const std::string_view p) {
+    return std::find_if(devices_.cbegin(), devices_.cend(), [&](const auto& d) {
+      return rex::string::utf8_starts_with_case(p, d->mount_path());
+    });
+  };
+  auto it = find_device(normalized_path);
+
+  // A device-less (relative) path resolves against the current directory; on a
+  // disc-launched title that is the launch device. Retry once with the
+  // configured default device prepended.
+  if (it == devices_.cend() && normalized_path.find(':') == std::string::npos &&
+      !REXCVAR_GET(default_device).empty()) {
+    std::string rebased = REXCVAR_GET(default_device);
+    if (rebased.back() != '\\' && !normalized_path.empty() &&
+        normalized_path.front() != '\\') {
+      rebased += '\\';
+    }
+    rebased += normalized_path;
+    // The default device is typically a symlink (game: -> \Device\...); resolve
+    // it the same way the primary path was resolved above before matching.
+    std::string rebased_resolved;
+    if (ResolveSymbolicLink(rebased, rebased_resolved)) {
+      rebased = rebased_resolved;
+    }
+    auto rebased_it = find_device(rebased);
+    if (rebased_it != devices_.cend()) {
+      REXFS_TRACE("VFS: rebased relative '{}' -> '{}'", path, rebased);
+      normalized_path = rebased;
+      it = rebased_it;
+    }
+  }
+
   if (it == devices_.cend()) {
     REXFS_WARN("VFS: '{}' -> [no device]", path);
     // Supress logging the error for ShaderDumpxe:\CompareBackEnds as this is

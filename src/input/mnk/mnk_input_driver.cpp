@@ -29,6 +29,8 @@ REXCVAR_DEFINE_BOOL(mnk_mode, false, "Input", "Enable keyboard/mouse controller 
 REXCVAR_DEFINE_INT32(mnk_user_index, 0, "Input", "Controller slot (0-3) for MnK").range(0, 3);
 REXCVAR_DEFINE_DOUBLE(mnk_sensitivity, 1.0, "Input", "Mouse sensitivity for right stick")
     .range(0.01, 10.0);
+REXCVAR_DEFINE_BOOL(mnk_mouse_to_right_stick, true, "Input",
+                    "Convert mouse movement to the emulated right stick");
 
 REXCVAR_DEFINE_STRING(keybind_a, "Space", "Input/Keybinds/Controller", "A button");
 REXCVAR_DEFINE_STRING(keybind_b, "Shift", "Input/Keybinds/Controller", "B button");
@@ -199,8 +201,12 @@ X_RESULT MnkInputDriver::GetState(uint32_t user_index, X_INPUT_STATE* out_state)
 
   double sensitivity = REXCVAR_GET(mnk_sensitivity);
   constexpr double kBaseScale = 200.0;
-  int32_t rx = static_cast<int32_t>(mouse_dx_ * sensitivity * kBaseScale);
-  int32_t ry = static_cast<int32_t>(-mouse_dy_ * sensitivity * kBaseScale);
+  int32_t rx = 0;
+  int32_t ry = 0;
+  if (REXCVAR_GET(mnk_mouse_to_right_stick)) {
+    rx = static_cast<int32_t>(mouse_dx_ * sensitivity * kBaseScale);
+    ry = static_cast<int32_t>(-mouse_dy_ * sensitivity * kBaseScale);
+  }
   mouse_dx_ = 0;
   mouse_dy_ = 0;
 
@@ -246,6 +252,21 @@ X_RESULT MnkInputDriver::GetKeystroke(uint32_t user_index, uint32_t flags,
   return X_ERROR_SUCCESS;
 }
 
+bool MnkInputDriver::ConsumeRawMouseDelta(int32_t& delta_x, int32_t& delta_y) {
+  std::lock_guard lock(state_mutex_);
+  if (!IsEnabled() || !is_active() || !has_focus_ || !mouse_captured_) {
+    delta_x = 0;
+    delta_y = 0;
+    return false;
+  }
+
+  delta_x = raw_mouse_dx_;
+  delta_y = raw_mouse_dy_;
+  raw_mouse_dx_ = 0;
+  raw_mouse_dy_ = 0;
+  return true;
+}
+
 void MnkInputDriver::EnqueueKeystroke(uint16_t vk_pad, bool down) {
   X_INPUT_KEYSTROKE ks = {};
   ks.virtual_key = vk_pad;
@@ -287,6 +308,8 @@ void MnkInputDriver::UpdateMouseCapture() {
     // Reset deltas to avoid a spike on capture start
     mouse_dx_ = 0;
     mouse_dy_ = 0;
+    raw_mouse_dx_ = 0;
+    raw_mouse_dy_ = 0;
   } else if (!should_capture && mouse_captured_) {
     mouse_captured_ = false;
     attached_window_->SetCursorVisibility(precapture_cursor_visibility_);
@@ -365,8 +388,12 @@ void MnkInputDriver::OnMouseMove(rex::ui::MouseEvent& e) {
   std::lock_guard lock(state_mutex_);
   int32_t x = e.x();
   int32_t y = e.y();
-  mouse_dx_ += x - prev_mouse_x_;
-  mouse_dy_ += y - prev_mouse_y_;
+  const int32_t delta_x = x - prev_mouse_x_;
+  const int32_t delta_y = y - prev_mouse_y_;
+  mouse_dx_ += delta_x;
+  mouse_dy_ += delta_y;
+  raw_mouse_dx_ += delta_x;
+  raw_mouse_dy_ += delta_y;
   prev_mouse_x_ = x;
   prev_mouse_y_ = y;
 }
@@ -377,6 +404,8 @@ void MnkInputDriver::OnLostFocus(rex::ui::UISetupEvent&) {
   std::memset(key_down_, 0, sizeof(key_down_));
   mouse_dx_ = 0;
   mouse_dy_ = 0;
+  raw_mouse_dx_ = 0;
+  raw_mouse_dy_ = 0;
   if (mouse_captured_ && attached_window_) {
     mouse_captured_ = false;
     attached_window_->SetCursorVisibility(precapture_cursor_visibility_);

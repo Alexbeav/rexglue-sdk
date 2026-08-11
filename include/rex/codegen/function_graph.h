@@ -57,11 +57,11 @@ class FunctionGraph {
   // Notifies all PENDING functions to try resolution against the new entry.
   // hasXrefs: true if this is a known call target (bl target, etc.)
   FunctionNode* addFunction(uint32_t base, uint32_t size, FunctionAuthority authority,
-                            bool hasXrefs = false);
+                            bool hasXrefs = false, bool notify = true);
 
   // Add a named function to the graph (convenience overload)
   FunctionNode* addFunction(uint32_t base, uint32_t size, FunctionAuthority authority,
-                            std::string_view name, bool hasXrefs = false);
+                            std::string_view name, bool hasXrefs = false, bool notify = true);
 
   // Add a resolved import as a callable function with __imp__ name
   // Address is the thunk address that bl instructions target

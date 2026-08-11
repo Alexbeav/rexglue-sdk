@@ -11,6 +11,7 @@
 
 #include <rex/kernel/xam/module.h>
 #include <rex/kernel/xam/private.h>
+#include <rex/kernel/xboxkrnl/error.h>
 #include <rex/logging.h>
 #include <rex/hook.h>
 #include <rex/types.h>
@@ -44,19 +45,31 @@ struct XTASK_MESSAGE {
 };
 static_assert_size(XTASK_MESSAGE, 0x1C);
 
+struct XAM_TASK_ARGS {
+  be<uint32_t> flags;
+  be<uint32_t> value2;
+};
+static_assert_size(XAM_TASK_ARGS, 0x8);
+
 u32 XamTaskSchedule_entry(mapped_void callback, ppc_ptr_t<XTASK_MESSAGE> message,
-                          mapped_u32 unknown, mapped_u32 handle_ptr) {
+                          mapped_u32 optional_ptr, mapped_u32 handle_ptr) {
   // TODO(gibbed): figure out what this is for
   *handle_ptr = 12345;
+
+  if (optional_ptr) {
+    auto* option = reinterpret_cast<XAM_TASK_ARGS*>(optional_ptr.host_address());
+    REXKRNL_DEBUG("Got XAM task args: flags={:08X}, value2={:08X}",
+                  static_cast<uint32_t>(option->flags), static_cast<uint32_t>(option->value2));
+  }
 
   uint32_t stack_size = REX_KERNEL_STATE()->GetExecutableModule()->stack_size();
 
   // Stack must be aligned to 16kb pages
   stack_size = std::max((uint32_t)0x4000, ((stack_size + 0xFFF) & 0xFFFFF000));
 
-  auto thread =
-      object_ref<XThread>(new XThread(REX_KERNEL_STATE(), stack_size, 0, callback.guest_address(),
-                                      message.guest_address(), 0, true));
+  auto thread = object_ref<XThread>(
+      new XThread(REX_KERNEL_STATE(), stack_size, 0, callback.guest_address(),
+                  message.guest_address(), 0, true, false, REX_KERNEL_STATE()->GetSystemProcess()));
 
   X_STATUS result = thread->Create();
 
@@ -76,8 +89,13 @@ u32 XamTaskShouldExit_entry(u32 r3) {
 }
 
 u32 XamTaskCloseHandle_entry(u32 handle) {
-  REXKRNL_DEBUG("XamTaskCloseHandle({:#x}) - stub", (uint32_t)handle);
-  return X_STATUS_SUCCESS;
+  const X_STATUS error_code = REX_KERNEL_OBJECTS()->ReleaseHandle(handle);
+  if (XFAILED(error_code)) {
+    XThread::SetLastError(xboxkrnl::xeRtlNtStatusToDosError(error_code));
+    return false;
+  }
+
+  return true;
 }
 
 }  // namespace xam

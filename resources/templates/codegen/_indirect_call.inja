@@ -23,6 +23,16 @@
   do {                                                                                     \
     REX_PROFILE_INDIRECT_DISPATCH();                                                       \
     uint32_t rex_indirect_target_ = (uint32_t)(x);                                         \
+    ctx.last_indirect_target = rex_indirect_target_;                                       \
+    ctx.last_indirect_caller = ctx.current_function;                                       \
+    ctx.last_indirect_callsite = ctx.current_instruction;                                  \
+    ctx.last_indirect_r3 = ctx.r3.u32;                                                      \
+    ctx.last_indirect_r4 = ctx.r4.u32;                                                      \
+    auto& rex_indirect_trace_ =                                                           \
+        ctx.indirect_trace[ctx.indirect_trace_index++ &                                   \
+                           (PPCContext::kIndirectTraceCapacity - 1)];                       \
+    rex_indirect_trace_ = {rex_indirect_target_, ctx.current_function,                    \
+                           ctx.current_instruction, ctx.r3.u32, ctx.r4.u32};                \
     PPCFunc* rex_indirect_func_;                                                           \
     if ((uint32_t)(rex_indirect_target_ - REX_CODE_BASE) <                                 \
         REX_CODE_SIZE + REX_THUNK_RESERVE_SIZE) [[likely]] {                               \
@@ -31,7 +41,6 @@
       rex_indirect_func_ = nullptr;                                                        \
     }                                                                                      \
     if (!rex_indirect_func_) [[unlikely]] {                                                \
-      ctx.last_indirect_target = rex_indirect_target_;                                     \
       rex_indirect_func_ = rex::runtime::ResolveIndirectFunction(rex_indirect_target_);    \
     }                                                                                      \
     rex_indirect_func_(ctx, base);                                                         \

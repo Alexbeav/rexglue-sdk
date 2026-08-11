@@ -52,6 +52,9 @@ class ProgressReporter {
   /** A named phase within the current module is starting. */
   virtual void phaseChanged(std::string_view name) = 0;
 
+  /** The named phase finished successfully. */
+  virtual void phaseFinished(std::string_view, std::chrono::milliseconds) {}
+
   /** The current module finished successfully. */
   virtual void moduleFinished(std::chrono::milliseconds elapsed) = 0;
 

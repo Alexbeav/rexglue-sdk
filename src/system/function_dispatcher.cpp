@@ -22,6 +22,7 @@
 #include <rex/runtime.h>
 #include <rex/system/function_dispatcher.h>
 #include <rex/system/thread_state.h>
+#include <rex/system/xthread.h>
 
 namespace rex::runtime {
 
@@ -35,8 +36,9 @@ FunctionDispatcher* GetBoundFunctionDispatcher() {
 }  // namespace
 
 static void InvalidFunctionTrap(PPCContext& ctx, uint8_t* /*base*/) {
-  REX_FATAL("Call to invalid or unregistered function at guest address 0x{:08X}",
-            ctx.last_indirect_target);
+  REX_FATAL("Call to invalid or unregistered function at guest address 0x{:08X} "
+            "(caller lr=0x{:08X})",
+            ctx.last_indirect_target, (uint32_t)ctx.lr);
 }
 
 PPCFunc* ResolveIndirectFunction(uint32_t guest_address) {
@@ -50,6 +52,14 @@ PPCFunc* ResolveIndirectFunction(uint32_t guest_address) {
   }
 
   return &InvalidFunctionTrap;
+}
+
+[[noreturn]] void ReenterGuestFunction(uint32_t address) {
+  auto* thread = rex::system::XThread::GetCurrentThread();
+  if (!thread) {
+    REX_FATAL("Guest reentry at 0x{:08X} has no active XThread", address);
+  }
+  thread->Reenter(address);
 }
 
 FunctionDispatcher::FunctionDispatcher(rex::memory::Memory* memory, ExportResolver* export_resolver)
@@ -111,6 +121,12 @@ uint64_t FunctionDispatcher::Execute(ThreadState* thread_state, uint32_t address
   if (arg_count > 7)
     ctx->r10.u64 = args[7];
 
+  ctx->last_dispatch_target = address;
+  ctx->last_dispatch_kind = 1;
+  ctx->last_dispatch_arg_count = static_cast<uint32_t>(arg_count);
+  ctx->last_dispatch_r3 = ctx->r3.u32;
+  ctx->last_dispatch_r4 = ctx->r4.u32;
+
   // FIXME: stack-arg path assumes 32-bit values; 64-bit and float args are wrong.
   if (arg_count > 8) {
     auto stack_arg_base =
@@ -148,6 +164,12 @@ uint64_t FunctionDispatcher::ExecuteInterrupt(ThreadState* thread_state, uint32_
     ctx->r6.u64 = args[3];
   if (arg_count > 4)
     ctx->r7.u64 = args[4];
+
+  ctx->last_dispatch_target = address;
+  ctx->last_dispatch_kind = 2;
+  ctx->last_dispatch_arg_count = static_cast<uint32_t>(arg_count);
+  ctx->last_dispatch_r3 = ctx->r3.u32;
+  ctx->last_dispatch_r4 = ctx->r4.u32;
 
   // TLS ptr must be zero during interrupts. Some games check this and early-exit
   // routines when under interrupts.

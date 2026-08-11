@@ -36,6 +36,7 @@
 #include <rex/perf/counter.h>
 #include <rex/thread/mutex.h>
 #include <rex/system/checkpoint.h>
+#include <rex/system/memory_provenance.h>
 #include <rex/system/mmio_handler.h>
 
 #include <atomic>
@@ -118,10 +119,54 @@ extern PPCFuncMapping PPCFuncMappings[];
 #define REX_LOAD_STRING(x, len) \
   std::string_view(reinterpret_cast<const char*>(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)), (len))
 
-#define REX_STORE_U8(x, y)  (*(volatile u8*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)) = (y))
-#define REX_STORE_U16(x, y) (*(volatile u16*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)) = __builtin_bswap16(y))
-#define REX_STORE_U32(x, y) (*(volatile u32*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)) = __builtin_bswap32(y))
-#define REX_STORE_U64(x, y) (*(volatile u64*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)) = __builtin_bswap64(y))
+#define REX_TRACE_MEMORY_STORE(address, size, value)                                      \
+  do {                                                                                    \
+    const u32 rex_trace_address_ = (address);                                             \
+    const u32 rex_trace_length_ = ctx.memory_trace_length;                                \
+    if (rex_trace_length_ != 0) [[unlikely]] {                                            \
+      const u64 rex_trace_store_end_ = (u64)rex_trace_address_ + (size);                  \
+      const u64 rex_trace_watch_end_ =                                                    \
+          (u64)ctx.memory_trace_address + rex_trace_length_;                              \
+      if (rex_trace_address_ < rex_trace_watch_end_ &&                                    \
+          ctx.memory_trace_address < rex_trace_store_end_) [[unlikely]] {                 \
+        rex::runtime::RecordMemoryProvenanceStore(ctx, rex_trace_address_, (size),         \
+                                                   (u64)(value));                          \
+      }                                                                                   \
+    }                                                                                     \
+  } while (0)
+
+#define REX_STORE_U8(x, y)                                                               \
+  do {                                                                                    \
+    const u32 rex_store_address_ = (u32)(x);                                              \
+    const u8 rex_store_value_ = (u8)(y);                                                  \
+    REX_TRACE_MEMORY_STORE(rex_store_address_, 1, rex_store_value_);                      \
+    *(volatile u8*)(base + rex_store_address_ + REX_PHYS_HOST_OFFSET(rex_store_address_)) = \
+        rex_store_value_;                                                                 \
+  } while (0)
+#define REX_STORE_U16(x, y)                                                              \
+  do {                                                                                    \
+    const u32 rex_store_address_ = (u32)(x);                                              \
+    const u16 rex_store_value_ = (u16)(y);                                                \
+    REX_TRACE_MEMORY_STORE(rex_store_address_, 2, rex_store_value_);                      \
+    *(volatile u16*)(base + rex_store_address_ + REX_PHYS_HOST_OFFSET(rex_store_address_)) = \
+        __builtin_bswap16(rex_store_value_);                                               \
+  } while (0)
+#define REX_STORE_U32(x, y)                                                              \
+  do {                                                                                    \
+    const u32 rex_store_address_ = (u32)(x);                                              \
+    const u32 rex_store_value_ = (u32)(y);                                                \
+    REX_TRACE_MEMORY_STORE(rex_store_address_, 4, rex_store_value_);                      \
+    *(volatile u32*)(base + rex_store_address_ + REX_PHYS_HOST_OFFSET(rex_store_address_)) = \
+        __builtin_bswap32(rex_store_value_);                                               \
+  } while (0)
+#define REX_STORE_U64(x, y)                                                              \
+  do {                                                                                    \
+    const u32 rex_store_address_ = (u32)(x);                                              \
+    const u64 rex_store_value_ = (u64)(y);                                                \
+    REX_TRACE_MEMORY_STORE(rex_store_address_, 8, rex_store_value_);                      \
+    *(volatile u64*)(base + rex_store_address_ + REX_PHYS_HOST_OFFSET(rex_store_address_)) = \
+        __builtin_bswap64(rex_store_value_);                                               \
+  } while (0)
 
 #define REX_MEMORY_SIZE 0x100000000ull
 
@@ -133,51 +178,58 @@ extern PPCFuncMapping PPCFuncMappings[];
 
 #define REX_MM_STORE_U8(addr, val)                                                         \
   do {                                                                                     \
-    u32 _mmio_addr = (addr);                                                               \
+    const u32 _mmio_addr = (addr);                                                         \
+    const u8 _mmio_value = (u8)(val);                                                      \
     if (REX_IS_MMIO_ADDR(_mmio_addr)) {                                                    \
       rex::runtime::MMIOHandler::global_handler()->CheckStore(_mmio_addr,                  \
-                                                              static_cast<u32>(val));      \
+                                                              static_cast<u32>(_mmio_value)); \
     } else {                                                                               \
-      *(volatile u8*)(base + _mmio_addr + REX_PHYS_HOST_OFFSET(_mmio_addr)) = (val);       \
+      REX_TRACE_MEMORY_STORE(_mmio_addr, 1, _mmio_value);                                  \
+      *(volatile u8*)(base + _mmio_addr + REX_PHYS_HOST_OFFSET(_mmio_addr)) = _mmio_value; \
     }                                                                                      \
   } while (0)
 
 #define REX_MM_STORE_U16(addr, val)                                                        \
   do {                                                                                     \
-    u32 _mmio_addr = (addr);                                                               \
+    const u32 _mmio_addr = (addr);                                                         \
+    const u16 _mmio_value = (u16)(val);                                                    \
     if (REX_IS_MMIO_ADDR(_mmio_addr)) {                                                    \
       rex::runtime::MMIOHandler::global_handler()->CheckStore(_mmio_addr,                  \
-                                                              static_cast<u32>(val));      \
+                                                              static_cast<u32>(_mmio_value)); \
     } else {                                                                               \
+      REX_TRACE_MEMORY_STORE(_mmio_addr, 2, _mmio_value);                                  \
       *(volatile u16*)(base + _mmio_addr + REX_PHYS_HOST_OFFSET(_mmio_addr)) =             \
-          __builtin_bswap16(val);                                                          \
+          __builtin_bswap16(_mmio_value);                                                  \
     }                                                                                      \
   } while (0)
 
 #define REX_MM_STORE_U32(addr, val)                                                        \
   do {                                                                                     \
-    u32 _mmio_addr = (addr);                                                               \
+    const u32 _mmio_addr = (addr);                                                         \
+    const u32 _mmio_value = (u32)(val);                                                    \
     if (REX_IS_MMIO_ADDR(_mmio_addr)) {                                                    \
       rex::runtime::MMIOHandler::global_handler()->CheckStore(_mmio_addr,                  \
-                                                              static_cast<u32>(val));      \
+                                                              _mmio_value);                \
     } else {                                                                               \
+      REX_TRACE_MEMORY_STORE(_mmio_addr, 4, _mmio_value);                                  \
       *(volatile u32*)(base + _mmio_addr + REX_PHYS_HOST_OFFSET(_mmio_addr)) =             \
-          __builtin_bswap32(val);                                                          \
+          __builtin_bswap32(_mmio_value);                                                  \
     }                                                                                      \
   } while (0)
 
 #define REX_MM_STORE_U64(addr, val)                                                               \
   do {                                                                                            \
-    u32 _mmio_addr = (addr);                                                                      \
+    const u32 _mmio_addr = (addr);                                                               \
+    const u64 _mmio_value = (u64)(val);                                                          \
     if (REX_IS_MMIO_ADDR(_mmio_addr)) {                                                           \
-      u64 _v64 = static_cast<u64>(val);                                                           \
       rex::runtime::MMIOHandler::global_handler()->CheckStore(_mmio_addr,                         \
-                                                              static_cast<u32>(_v64 >> 32));      \
+                                                              static_cast<u32>(_mmio_value >> 32)); \
       rex::runtime::MMIOHandler::global_handler()->CheckStore(_mmio_addr + 4,                     \
-                                                              static_cast<u32>(_v64));            \
+                                                              static_cast<u32>(_mmio_value));     \
     } else {                                                                                      \
+      REX_TRACE_MEMORY_STORE(_mmio_addr, 8, _mmio_value);                                         \
       *(volatile u64*)(base + _mmio_addr + REX_PHYS_HOST_OFFSET(_mmio_addr)) =                    \
-          __builtin_bswap64(val);                                                                 \
+          __builtin_bswap64(_mmio_value);                                                         \
     }                                                                                             \
   } while (0)
 

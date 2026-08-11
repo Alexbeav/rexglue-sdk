@@ -234,6 +234,14 @@ bool CodegenWriter::write(bool force) {
   std::erase_if(functions, [&rexcrtByAddr](const FunctionNode* fn) {
     return rexcrtByAddr.contains(static_cast<uint32_t>(fn->base()));
   });
+  std::erase_if(functions, [&](const FunctionNode* fn) {
+    auto configIt = config().functions.find(fn->base());
+    if (configIt == config().functions.end() || !configIt->second.isChunk()) {
+      return false;
+    }
+    const auto* parent = graph().getFunction(configIt->second.parent);
+    return parent && parent->containsBlockAddress(fn->base());
+  });
 
   // Build EmitContext -- resolver is now properly connected
   EmitContext emitCtx{binary(), config(), graph(),

@@ -40,6 +40,7 @@ set(REXSYSTEM_SOURCES
     lzx.cpp
     mmio_handler.cpp
     map_parser.cpp
+    memory_provenance.cpp
     module.cpp
     function_dispatcher.cpp
     gpu_plugin_loader.cpp

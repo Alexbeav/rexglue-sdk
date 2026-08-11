@@ -12,6 +12,8 @@
 #include "builder_context.h"
 #include "helpers.h"
 
+#include <string_view>
+
 #include <fmt/format.h>
 
 #include <rex/logging.h>
@@ -19,6 +21,14 @@
 #include "../codegen_logging.h"
 
 namespace rex::codegen {
+
+static void emit_conditional_lr_return(BuilderContext& ctx, std::string_view condition) {
+  ctx.println("\tif ({}) {{", condition);
+  ctx.println("\t\tif (!rex_lr_restore_helper_ && uint32_t(ctx.lr) != rex_entry_lr_) "
+              "rex::runtime::ReenterGuestFunction(uint32_t(ctx.lr));");
+  ctx.println("\t\treturn;");
+  ctx.println("\t}}");
+}
 
 //=============================================================================
 // Unconditional Branch
@@ -92,6 +102,8 @@ bool build_bl(BuilderContext& ctx) {
 }
 
 bool build_blr(BuilderContext& ctx) {
+  ctx.println("\tif (!rex_lr_restore_helper_ && uint32_t(ctx.lr) != rex_entry_lr_) "
+              "rex::runtime::ReenterGuestFunction(uint32_t(ctx.lr));");
   ctx.println("\treturn;");
   return true;
 }
@@ -211,13 +223,21 @@ bool build_bdz(BuilderContext& ctx) {
 
 bool build_bdzlr(BuilderContext& ctx) {
   ctx.println("\t--{}.u64;", ctx.ctr());
-  ctx.println("\tif ({}.u32 == 0) return;", ctx.ctr());
+  ctx.println("\tif ({}.u32 == 0) {{", ctx.ctr());
+  ctx.println("\t\tif (!rex_lr_restore_helper_ && uint32_t(ctx.lr) != rex_entry_lr_) "
+              "rex::runtime::ReenterGuestFunction(uint32_t(ctx.lr));");
+  ctx.println("\t\treturn;");
+  ctx.println("\t}}");
   return true;
 }
 
 bool build_bdnzlr(BuilderContext& ctx) {
   ctx.println("\t--{}.u64;", ctx.ctr());
-  ctx.println("\tif ({}.u32 != 0) return;", ctx.ctr());
+  ctx.println("\tif ({}.u32 != 0) {{", ctx.ctr());
+  ctx.println("\t\tif (!rex_lr_restore_helper_ && uint32_t(ctx.lr) != rex_entry_lr_) "
+              "rex::runtime::ReenterGuestFunction(uint32_t(ctx.lr));");
+  ctx.println("\t\treturn;");
+  ctx.println("\t}}");
   return true;
 }
 
@@ -268,7 +288,7 @@ bool build_beq(BuilderContext& ctx) {
 }
 
 bool build_beqlr(BuilderContext& ctx) {
-  ctx.println("\tif ({}.eq) return;", ctx.cr(ctx.insn.operands[0]));
+  emit_conditional_lr_return(ctx, fmt::format("{}.eq", ctx.cr(ctx.insn.operands[0])));
   return true;
 }
 
@@ -278,7 +298,7 @@ bool build_bne(BuilderContext& ctx) {
 }
 
 bool build_bnelr(BuilderContext& ctx) {
-  ctx.println("\tif (!{}.eq) return;", ctx.cr(ctx.insn.operands[0]));
+  emit_conditional_lr_return(ctx, fmt::format("!{}.eq", ctx.cr(ctx.insn.operands[0])));
   return true;
 }
 
@@ -292,7 +312,7 @@ bool build_blt(BuilderContext& ctx) {
 }
 
 bool build_bltlr(BuilderContext& ctx) {
-  ctx.println("\tif ({}.lt) return;", ctx.cr(ctx.insn.operands[0]));
+  emit_conditional_lr_return(ctx, fmt::format("{}.lt", ctx.cr(ctx.insn.operands[0])));
   return true;
 }
 
@@ -302,7 +322,7 @@ bool build_bge(BuilderContext& ctx) {
 }
 
 bool build_bgelr(BuilderContext& ctx) {
-  ctx.println("\tif (!{}.lt) return;", ctx.cr(ctx.insn.operands[0]));
+  emit_conditional_lr_return(ctx, fmt::format("!{}.lt", ctx.cr(ctx.insn.operands[0])));
   return true;
 }
 
@@ -316,7 +336,7 @@ bool build_bgt(BuilderContext& ctx) {
 }
 
 bool build_bgtlr(BuilderContext& ctx) {
-  ctx.println("\tif ({}.gt) return;", ctx.cr(ctx.insn.operands[0]));
+  emit_conditional_lr_return(ctx, fmt::format("{}.gt", ctx.cr(ctx.insn.operands[0])));
   return true;
 }
 
@@ -326,7 +346,7 @@ bool build_ble(BuilderContext& ctx) {
 }
 
 bool build_blelr(BuilderContext& ctx) {
-  ctx.println("\tif (!{}.gt) return;", ctx.cr(ctx.insn.operands[0]));
+  emit_conditional_lr_return(ctx, fmt::format("!{}.gt", ctx.cr(ctx.insn.operands[0])));
   return true;
 }
 
@@ -340,7 +360,7 @@ bool build_bso(BuilderContext& ctx) {
 }
 
 bool build_bsolr(BuilderContext& ctx) {
-  ctx.println("\tif ({}.so) return;", ctx.cr(ctx.insn.operands[0]));
+  emit_conditional_lr_return(ctx, fmt::format("{}.so", ctx.cr(ctx.insn.operands[0])));
   return true;
 }
 
@@ -350,7 +370,7 @@ bool build_bns(BuilderContext& ctx) {
 }
 
 bool build_bnslr(BuilderContext& ctx) {
-  ctx.println("\tif (!{}.so) return;", ctx.cr(ctx.insn.operands[0]));
+  emit_conditional_lr_return(ctx, fmt::format("!{}.so", ctx.cr(ctx.insn.operands[0])));
   return true;
 }
 

@@ -38,6 +38,12 @@ class InputDriver {
   virtual X_RESULT GetKeystroke(uint32_t user_index, uint32_t flags,
                                 X_INPUT_KEYSTROKE* out_keystroke) = 0;
 
+  virtual bool ConsumeRawMouseDelta(int32_t& delta_x, int32_t& delta_y) {
+    delta_x = 0;
+    delta_y = 0;
+    return false;
+  }
+
   virtual void OnWindowAvailable(rex::ui::Window* /*window*/) {}
 
   void set_is_active_callback(std::function<bool()> is_active_callback) {

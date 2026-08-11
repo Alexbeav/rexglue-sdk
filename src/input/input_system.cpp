@@ -57,6 +57,17 @@ void InputSystem::SetActiveCallback(std::function<bool()> callback) {
   }
 }
 
+bool InputSystem::ConsumeRawMouseDelta(int32_t& delta_x, int32_t& delta_y) {
+  for (auto& driver : drivers_) {
+    if (driver->ConsumeRawMouseDelta(delta_x, delta_y)) {
+      return true;
+    }
+  }
+  delta_x = 0;
+  delta_y = 0;
+  return false;
+}
+
 X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
                                       X_INPUT_CAPABILITIES* out_caps) {
   SCOPE_profile_cpu_f("hid");

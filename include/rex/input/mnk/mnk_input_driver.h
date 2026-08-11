@@ -37,6 +37,9 @@ class MnkInputDriver final : public InputDriver,
   X_RESULT GetKeystroke(uint32_t user_index, uint32_t flags,
                         X_INPUT_KEYSTROKE* out_keystroke) override;
 
+  // Consume unclamped mouse movement without changing controller-stick state.
+  bool ConsumeRawMouseDelta(int32_t& delta_x, int32_t& delta_y) override;
+
   void OnWindowAvailable(rex::ui::Window* window) override;
 
   // WindowInputListener
@@ -67,6 +70,8 @@ class MnkInputDriver final : public InputDriver,
   // Mouse delta tracking
   int32_t mouse_dx_ = 0;
   int32_t mouse_dy_ = 0;
+  int32_t raw_mouse_dx_ = 0;
+  int32_t raw_mouse_dy_ = 0;
   int32_t prev_mouse_x_ = 0;
   int32_t prev_mouse_y_ = 0;
   bool mouse_captured_ = false;

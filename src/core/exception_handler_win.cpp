@@ -15,8 +15,16 @@
 
 #include "platform_win.h"
 
+#include <algorithm>
+
 #include <rex/assert.h>
+#include <fmt/format.h>
+#include <rex/logging.h>
 #include <rex/math.h>
+#include <rex/ppc/stack.h>
+#include <rex/system/thread_state.h>
+#include <rex/system/memory_provenance.h>
+#include <rex/system/xthread.h>
 
 namespace rex::arch {
 
@@ -96,6 +104,61 @@ LONG CALLBACK ExceptionHandlerCallback(PEXCEPTION_POINTERS ex_info) {
                     &thread_context.xmm_registers[modified_register_index], sizeof(vec128_t));
       }
       return EXCEPTION_CONTINUE_EXECUTION;
+    }
+  }
+  // No handler took it: an unhandled guest access violation. Log the current
+  // guest thread's PPC context so the faulting guest state is visible without
+  // reverse-engineering a minidump (host->guest RIP mapping is unreliable at
+  // -O3). [AVDIAG]
+  if (ex_info->ExceptionRecord->ExceptionCode == STATUS_ACCESS_VIOLATION) {
+    auto* ts = rex::runtime::ThreadState::Get();
+    if (ts && ts->context()) {
+      auto* c = ts->context();
+      REXLOG_ERROR(
+          "[AVDIAG] guest AV: fault=0x{:X} function=0x{:08X} pc=0x{:08X} lr=0x{:08X} "
+          "r1(sp)=0x{:08X} r3=0x{:08X} "
+          "r4=0x{:08X} r11=0x{:08X} r20=0x{:08X} r31=0x{:08X} "
+          "indirect_target=0x{:08X} indirect_caller=0x{:08X} "
+          "indirect_callsite=0x{:08X} indirect_r3=0x{:08X} indirect_r4=0x{:08X} "
+          "dispatch_target=0x{:08X} dispatch_kind=0x{:X} dispatch_argc=0x{:X} "
+          "dispatch_r3=0x{:08X} dispatch_r4=0x{:08X}",
+          ex_info->ExceptionRecord->ExceptionInformation[1], (uint32_t)c->current_function,
+          (uint32_t)c->current_instruction, (uint32_t)c->lr, c->r1.u32, c->r3.u32, c->r4.u32,
+          c->r11.u32, c->r20.u32, c->r31.u32, c->last_indirect_target,
+          c->last_indirect_caller, c->last_indirect_callsite, c->last_indirect_r3,
+          c->last_indirect_r4, c->last_dispatch_target, c->last_dispatch_kind,
+          c->last_dispatch_arg_count, c->last_dispatch_r3, c->last_dispatch_r4);
+      rex::runtime::LogMemoryProvenance();
+      const uint32_t trace_count =
+          std::min(c->indirect_trace_index, PPCContext::kIndirectTraceCapacity);
+      const uint32_t trace_start = c->indirect_trace_index - trace_count;
+      for (uint32_t sequence = trace_start; sequence < c->indirect_trace_index; ++sequence) {
+        const auto& trace =
+            c->indirect_trace[sequence & (PPCContext::kIndirectTraceCapacity - 1)];
+        REXLOG_ERROR(
+            "[AVDIAG] indirect trace: sequence=0x{:X} target=0x{:08X} caller=0x{:08X} "
+            "callsite=0x{:08X} r3=0x{:08X} r4=0x{:08X}",
+            sequence, trace.target, trace.caller, trace.callsite, trace.r3, trace.r4);
+      }
+      if (rex::system::XThread::IsInThread()) {
+        auto* thread = rex::system::XThread::GetCurrentThread();
+        const auto* creation = thread->creation_params();
+        REXLOG_ERROR(
+            "[AVDIAG] guest thread: id=0x{:X} handle=0x{:08X} main=0x{:X} process=0x{:08X} "
+            "start=0x{:08X} context=0x{:08X}",
+            thread->thread_id(), thread->handle(), thread->main_thread() ? 1 : 0,
+            creation->guest_process, creation->start_address, creation->start_context);
+      }
+      // Walk the guest stack for code-range return addresses (the call chain).
+      auto* base = rex::system::kernel_state()->memory()->virtual_membase();
+      uint32_t sp = c->r1.u32;
+      std::string chain;
+      for (int i = 0; i < 64 && sp >= 0x1000 && sp < 0xC0000000; ++i) {
+        uint32_t w = __builtin_bswap32(*reinterpret_cast<uint32_t*>(base + sp + i * 4));
+        if ((w >= 0x82000000 && w < 0x831F0000) || (w >= 0x88050000 && w < 0x88250000))
+          chain += fmt::format(" 0x{:08X}", w);
+      }
+      REXLOG_ERROR("[AVDIAG] guest return-addr chain:{}", chain);
     }
   }
   return EXCEPTION_CONTINUE_SEARCH;

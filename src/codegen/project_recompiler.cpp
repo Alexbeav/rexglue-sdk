@@ -299,13 +299,13 @@ Result<void> ProjectRecompiler::Run(const ProjectRecompilerOptions& opts) {
     contexts.push_back({std::move(ctx), &targeted[i + 1], std::move(dll_display)});
   }
 
-  std::vector<std::chrono::steady_clock::time_point> module_started_at(contexts.size());
+  std::vector<std::chrono::milliseconds> module_elapsed(contexts.size());
   for (size_t i = 0; i < contexts.size(); ++i) {
     auto& entry = contexts[i];
     if (opts.reporter) {
       opts.reporter->moduleStarted(entry.display_name, i, contexts.size());
     }
-    module_started_at[i] = std::chrono::steady_clock::now();
+    const auto analysis_started_at = std::chrono::steady_clock::now();
     REXCODEGEN_TRACE("Analyzing '{}'...", entry.module->targetName);
     auto result = Analyze(entry.ctx, opts.reporter);
     if (!result) {
@@ -317,6 +317,8 @@ Result<void> ProjectRecompiler::Run(const ProjectRecompilerOptions& opts) {
         return result;
       }
     }
+    module_elapsed[i] += std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - analysis_started_at);
   }
 
   for (size_t i = 0; i < contexts.size(); ++i) {
@@ -343,6 +345,7 @@ Result<void> ProjectRecompiler::Run(const ProjectRecompilerOptions& opts) {
       opts.reporter->phaseChanged("Write");
     }
     REXCODEGEN_TRACE("Writing output for '{}'...", entry.module->targetName);
+    const auto writeStarted = std::chrono::steady_clock::now();
     CodegenWriter writer(entry.ctx, runtime.get());
     if (!writer.write(opts.force)) {
       return Err<void>(ErrorCategory::Validation,
@@ -353,9 +356,11 @@ Result<void> ProjectRecompiler::Run(const ProjectRecompilerOptions& opts) {
     writtenFiles_.insert(writtenFiles_.end(), writer.writtenFiles().begin(),
                          writer.writtenFiles().end());
     if (opts.reporter) {
-      auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-          std::chrono::steady_clock::now() - module_started_at[i]);
-      opts.reporter->moduleFinished(elapsed);
+      opts.reporter->phaseFinished("Write", std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                std::chrono::steady_clock::now() - writeStarted));
+      module_elapsed[i] += std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now() - writeStarted);
+      opts.reporter->moduleFinished(module_elapsed[i]);
     }
   }
 

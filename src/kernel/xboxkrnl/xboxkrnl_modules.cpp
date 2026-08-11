@@ -163,6 +163,13 @@ u32 XexGetProcedureAddress_entry(mapped_void hmodule, u32 ordinal, mapped_u32 ou
 
   X_STATUS result = X_STATUS_INVALID_HANDLE;
 
+  // Always define the output. On the module-not-found path below the write was
+  // skipped entirely, leaving the guest's out buffer holding stack garbage;
+  // callers that don't check the status then call that garbage as a function
+  // pointer (observed in Forza Horizon looking up ordinal 1 of an unloaded
+  // facade module -> call to 0x88050388).
+  *out_function_ptr = 0;
+
   object_ref<XModule> module;
   if (!hmodule) {
     module = REX_KERNEL_STATE()->GetExecutableModule();

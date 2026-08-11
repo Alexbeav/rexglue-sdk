@@ -37,6 +37,7 @@ class ProgressView final : public rex::codegen::ProgressReporter {
   void binaryInfo(const rex::codegen::BinaryInfo& info) override;
   void moduleStarted(std::string_view name, std::size_t index, std::size_t total) override;
   void phaseChanged(std::string_view name) override;
+  void phaseFinished(std::string_view name, std::chrono::milliseconds elapsed) override;
   void moduleFinished(std::chrono::milliseconds elapsed) override;
   void projectPhaseStarted(std::string_view name) override;
   void projectPhaseFinished() override;

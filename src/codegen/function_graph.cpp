@@ -145,6 +145,15 @@ void FunctionNode::addBlock(Block block) {
   }
 }
 
+bool FunctionNode::containsBlockAddress(uint32_t addr) const {
+  for (const auto& block : blocks_) {
+    if (block.contains(addr)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool FunctionNode::containsAddress(uint32_t addr) const {
   // If no blocks are defined, use the declared linear range.
   if (blocks_.empty()) {
@@ -153,10 +162,8 @@ bool FunctionNode::containsAddress(uint32_t addr) const {
 
   // A reentry chunk can branch backward into its parent. Its discovered blocks
   // can therefore start before the chunk entry and its declared linear range.
-  for (const auto& block : blocks_) {
-    if (block.contains(addr)) {
-      return true;
-    }
+  if (containsBlockAddress(addr)) {
+    return true;
   }
 
   // For CONFIG and PDATA functions, trust the declared size even if blocks don't cover it
@@ -342,12 +349,38 @@ void emit_print(std::string& out, fmt::format_string<Args...> fmt, Args&&... arg
 
 }  // namespace
 
+std::vector<std::pair<uint32_t, std::string>> FunctionNode::parentBackedAliases(
+    const EmitContext& ctx) const {
+  std::vector<std::pair<uint32_t, std::string>> parentBackedAliases;
+  for (const auto& [address, config] : ctx.config.functions) {
+    if (config.parent != base() || address == base() || !containsBlockAddress(address)) {
+      continue;
+    }
+    const auto* aliasNode = ctx.graph.getFunction(address);
+    std::string aliasName = config.name;
+    if (aliasName.empty() && aliasNode && !aliasNode->name().empty()) {
+      aliasName = aliasNode->name();
+    }
+    if (aliasName.empty()) {
+      aliasName = fmt::format("sub_{:08X}", address);
+    }
+    parentBackedAliases.emplace_back(address, std::move(aliasName));
+  }
+  std::sort(parentBackedAliases.begin(), parentBackedAliases.end());
+  return parentBackedAliases;
+}
+
 std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
   if (authority() == FunctionAuthority::IMPORT) {
     return "";
   }
 
   std::string out;
+
+  // A configured entry inside this parent's discovered blocks is a dispatcher
+  // alias, not a second function body. The alias wrapper selects a local label
+  // and then enters the single compiled parent implementation.
+  const auto parentBackedAliases = this->parentBackedAliases(ctx);
 
   // --- Empty stub for functions with no blocks ---
   if (blocks().empty()) {
@@ -366,6 +399,8 @@ std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
     emit_println(out, "DEFINE_REX_FUNC({}) {{", name);
     emit_println(out, "\tREX_FUNC_PROLOGUE();");
     emit_println(out, "\trex::system::PollCheckpointBoundary(ctx, 0x{:08X});", base());
+    emit_println(out, "\tctx.current_function = 0x{:08X};", base());
+    emit_println(out, "\tctx.current_instruction = 0x{:08X};", base());
     emit_println(out, "}}\n");
     return out;
   }
@@ -465,6 +500,10 @@ std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
     }
   }
 
+  for (const auto& [address, aliasName] : parentBackedAliases) {
+    labels.emplace(address);
+  }
+
   // A reentry chunk can reach blocks before its configured entry. Blocks are
   // emitted in address order, so jump over those blocks on initial entry.
   const bool hasEarlierBlock =
@@ -488,10 +527,32 @@ std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
     name = fmt::format("sub_{:08X}", base());
   }
 
+  if (!parentBackedAliases.empty()) {
+    emit_println(out, "static thread_local uint32_t rex_entry_{:08X} = 0x{:08X};", base(),
+                 base());
+  }
+
   // Function signature with weak/alias pattern
   emit_println(out, "DEFINE_REX_FUNC({}) {{", name);
   emit_println(out, "\tREX_FUNC_PROLOGUE();");
-  emit_println(out, "\trex::system::PollCheckpointBoundary(ctx, 0x{:08X});", base());
+  if (!parentBackedAliases.empty()) {
+    emit_println(out, "\tconst uint32_t rex_entry = rex_entry_{:08X};", base());
+    emit_println(out, "\trex_entry_{:08X} = 0x{:08X};", base(), base());
+    emit_println(out, "\trex::system::PollCheckpointBoundary(ctx, rex_entry);");
+  } else {
+    emit_println(out, "\trex::system::PollCheckpointBoundary(ctx, 0x{:08X});", base());
+  }
+  emit_println(out, "\tconst uint32_t rex_entry_lr_ = uint32_t(ctx.lr);");
+  emit_println(out, "\tconstexpr bool rex_lr_restore_helper_ = {};",
+               name.starts_with("__rest") ? "true" : "false");
+  // Do not use an RAII scope here. Its destructor prevents native tail-call
+  // elimination across guest calls and can exhaust the native stack.
+  emit_println(out, "\tctx.current_function = 0x{:08X};", base());
+  if (!parentBackedAliases.empty()) {
+    emit_println(out, "\tctx.current_instruction = rex_entry;");
+  } else {
+    emit_println(out, "\tctx.current_instruction = 0x{:08X};", base());
+  }
 
   // --- Second pass: emit instruction code ---
   const JumpTable* activeJt = nullptr;
@@ -602,9 +663,20 @@ std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
           builderCtx.emit_mid_asm_hook();
         }
 
+        const size_t instructionBodyStart = body.size();
         if (!DispatchInstruction(id, builderCtx)) {
           REXCODEGEN_WARN("Unrecognized instruction at 0x{:X}: {}", blockBase, insn.opcode->name);
           allRecompiled = false;
+        }
+
+        const std::string_view instructionBody(body.data() + instructionBodyStart,
+                                               body.size() - instructionBodyStart);
+        if (instructionBody.find("REX_LOAD_") != std::string_view::npos ||
+            instructionBody.find("REX_STORE_") != std::string_view::npos ||
+            instructionBody.find("REX_MM_LOAD_") != std::string_view::npos ||
+            instructionBody.find("REX_MM_STORE_") != std::string_view::npos) {
+          body.insert(instructionBodyStart,
+                      fmt::format("\tctx.current_instruction = 0x{:08X};\n", blockBase));
         }
 
         // Check for mid-asm hook AFTER instruction
@@ -690,6 +762,14 @@ std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
   // If SEH, emit SEH_TRY and indent body
   if (generateSeh) {
     emit_println(out, "\tSEH_TRY {{");
+    if (!parentBackedAliases.empty()) {
+      emit_println(out, "\t\tswitch (rex_entry) {{");
+      for (const auto& [address, aliasName] : parentBackedAliases) {
+        emit_println(out, "\t\t\tcase 0x{:08X}: goto loc_{:X};", address, address);
+      }
+      emit_println(out, "\t\t\tdefault: break;");
+      emit_println(out, "\t\t}}");
+    }
     std::string indentedBody;
     indentedBody.reserve(body.size() + body.size() / 20);
     for (size_t i = 0; i < body.size(); ++i) {
@@ -700,7 +780,27 @@ std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
     }
     out += indentedBody;
   } else {
+    if (!parentBackedAliases.empty()) {
+      emit_println(out, "\tswitch (rex_entry) {{");
+      for (const auto& [address, aliasName] : parentBackedAliases) {
+        emit_println(out, "\t\tcase 0x{:08X}: goto loc_{:X};", address, address);
+      }
+      emit_println(out, "\t\tdefault: break;");
+      emit_println(out, "\t}}");
+    }
     out += body;
+  }
+
+  for (const auto& [address, aliasName] : parentBackedAliases) {
+    // Filtered alias nodes do not take part in the normal dependency pass.
+    // Give the public wrapper C linkage before DEFINE_REX_FUNC declares its
+    // weak alias, or Clang emits a C++-mangled symbol that init cannot link.
+    emit_println(out, "REX_EXTERN({});", aliasName);
+    emit_println(out, "DEFINE_REX_FUNC({}) {{", aliasName);
+    emit_println(out, "\tREX_FUNC_PROLOGUE();");
+    emit_println(out, "\trex_entry_{:08X} = 0x{:08X};", base(), address);
+    emit_println(out, "\t__imp__{}(ctx, base);", name);
+    emit_println(out, "}}\n");
   }
 
   return out;
@@ -747,7 +847,7 @@ void FunctionGraph::updateFunctionCodePointers() {
 //=============================================================================
 
 FunctionNode* FunctionGraph::addFunction(uint32_t base, uint32_t size, FunctionAuthority authority,
-                                         bool hasXrefs) {
+                                         bool hasXrefs, bool notify) {
   // Check for existing function at this address
   auto it = functions_.find(base);
   if (it != functions_.end()) {
@@ -775,15 +875,17 @@ FunctionNode* FunctionGraph::addFunction(uint32_t base, uint32_t size, FunctionA
   // Track xrefs for merge eligibility
   functionHasXrefs_[base] = hasXrefs;
 
-  // Notify all PENDING functions
-  notifyFunctionAdded(nodePtr);
+  // Notify all PENDING functions unless a phase adds a batch before resolution.
+  if (notify) {
+    notifyFunctionAdded(nodePtr);
+  }
 
   return nodePtr;
 }
 
 FunctionNode* FunctionGraph::addFunction(uint32_t base, uint32_t size, FunctionAuthority authority,
-                                         std::string_view name, bool hasXrefs) {
-  auto* node = addFunction(base, size, authority, hasXrefs);
+                                         std::string_view name, bool hasXrefs, bool notify) {
+  auto* node = addFunction(base, size, authority, hasXrefs, notify);
   if (node && !name.empty()) {
     node->setName(std::string(name));
   }
@@ -1207,7 +1309,8 @@ TargetKind FunctionGraph::classifyTarget(uint32_t target, uint32_t callerAddr,
   // stays local. Parent-owned continuation chunks are also dispatcher entry
   // points, but that registration must not turn a proven local branch into a
   // tail call. A link branch still calls the registered entry point.
-  if (!isCallInstruction && callerFn && callerFn->isLabel(target)) {
+  if (!isCallInstruction && callerFn && callerFn->isLabel(target) &&
+      callerFn->containsEmittedAddress(target)) {
     return TargetKind::InternalLabel;
   }
 
