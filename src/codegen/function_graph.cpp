@@ -935,11 +935,13 @@ bool FunctionGraph::removeFunction(uint32_t entryPoint) {
 }
 
 FunctionNode* FunctionGraph::getFunctionContaining(uint32_t addr) {
-  // O(log f) lookup via sorted base index: find last function with base <= addr
+  // Find the last function with base <= addr, then walk backward. Small
+  // overlapping entries can hide an earlier owner. A parent-backed alias is
+  // a dispatcher entry, not a second code owner.
   auto it = functionsByBase_.upper_bound(addr);
-  if (it != functionsByBase_.begin()) {
+  while (it != functionsByBase_.begin()) {
     --it;
-    if (it->second->containsAddress(addr)) {
+    if (!it->second->isParentBackedAlias() && it->second->containsAddress(addr)) {
       return it->second;
     }
   }
@@ -948,9 +950,9 @@ FunctionNode* FunctionGraph::getFunctionContaining(uint32_t addr) {
 
 const FunctionNode* FunctionGraph::getFunctionContaining(uint32_t addr) const {
   auto it = functionsByBase_.upper_bound(addr);
-  if (it != functionsByBase_.begin()) {
+  while (it != functionsByBase_.begin()) {
     --it;
-    if (it->second->containsAddress(addr)) {
+    if (!it->second->isParentBackedAlias() && it->second->containsAddress(addr)) {
       return it->second;
     }
   }

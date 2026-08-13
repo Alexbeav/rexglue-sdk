@@ -76,6 +76,8 @@ TEST_CASE("A continuation alias uses its parent's discovered body", "[codegen][g
 TEST_CASE("A verified parent-backed alias seals without duplicate blocks",
           "[codegen][graph]") {
   FunctionGraph graph;
+  auto* parent = graph.addFunction(0x5000, 0x100, FunctionAuthority::PDATA);
+  graph.addBlockToFunction(0x5000, {0x5000, 0x100});
   auto* alias = graph.addFunction(0x5040, 0x40, FunctionAuthority::CONFIG);
 
   REQUIRE(alias->canDiscover());
@@ -85,6 +87,9 @@ TEST_CASE("A verified parent-backed alias seals without duplicate blocks",
   REQUIRE(alias->canSeal());
   alias->seal();
   CHECK(alias->isSealed());
+  CHECK(graph.isEntryPoint(0x5040));
+  CHECK(graph.getFunctionContaining(0x5040) == parent);
+  CHECK(graph.getFunctionContaining(0x5060) == parent);
 }
 
 }  // namespace rex::codegen
