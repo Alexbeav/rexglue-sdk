@@ -385,6 +385,9 @@ bool ReXApp::SetupPresentation() {
 }
 
 void ReXApp::SetupOverlays(rex::ui::Presenter* presenter, rex::ui::ImmediateDrawer* drawer) {
+  if (presenter && !frame_stats_provider_) {
+    frame_stats_provider_ = [presenter] { return presenter->GetGuestFrameStats(); };
+  }
   imgui_drawer_ = std::make_unique<rex::ui::ImGuiDrawer>(
       window_.get(), 64, [this](ImFontAtlas* atlas) { OnConfigureFonts(atlas); });
   // presenter is nullptr in detached mode; ImGuiDrawer tolerates that and the
@@ -478,8 +481,8 @@ void ReXApp::LaunchModule() {
     const int32_t checkpoint_probe_delay = REXCVAR_GET(checkpoint_probe_after_ms);
     if (checkpoint_probe_delay > 0) {
       checkpoint_probe_thread_ = std::jthread([this, checkpoint_probe_delay](std::stop_token stop) {
-        const auto deadline = std::chrono::steady_clock::now() +
-                              std::chrono::milliseconds(checkpoint_probe_delay);
+        const auto deadline =
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(checkpoint_probe_delay);
         while (!stop.stop_requested() && std::chrono::steady_clock::now() < deadline) {
           std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }

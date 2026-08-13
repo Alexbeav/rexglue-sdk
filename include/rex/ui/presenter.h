@@ -31,6 +31,7 @@
 #include <rex/platform.h>
 #include <rex/types.h>
 #include <rex/ui/flags.h>
+#include <rex/ui/frame_stats.h>
 #include <rex/ui/surface.h>
 #include <rex/ui/ui_drawer.h>
 
@@ -358,6 +359,7 @@ class Presenter {
   bool RefreshGuestOutput(uint32_t frontbuffer_width, uint32_t frontbuffer_height,
                           uint32_t display_aspect_ratio_x, uint32_t display_aspect_ratio_y,
                           std::function<bool(GuestOutputRefreshContext& context)> refresher);
+  FrameStats GetGuestFrameStats() const { return guest_frame_stats_.GetStats(); }
   // The implementation must be callable from any thread, including from
   // multiple at the same time, and it should acquire the latest guest output
   // image via ConsumeGuestOutput.
@@ -976,6 +978,7 @@ class Presenter {
   // Accessible only by refreshing, whether the last refresh contained an image
   // rather than being blank.
   bool guest_output_active_last_refresh_ = false;
+  FrameStatsTracker guest_frame_stats_;
 
   // Ordered by the Z order, and then by the time of addition.
   // Note: All the iteration logic involving this Z ordering must be the same as

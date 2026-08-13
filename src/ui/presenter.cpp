@@ -646,6 +646,10 @@ bool Presenter::RefreshGuestOutput(
     }
   }
 
+  if (is_active) {
+    guest_frame_stats_.RecordFrame();
+  }
+
   return is_active;
 }
 
