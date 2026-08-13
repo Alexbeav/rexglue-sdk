@@ -35,6 +35,8 @@ REXCVAR_DEFINE_STRING(user_data_root, "", "Runtime", "Override user data path");
 REXCVAR_DEFINE_STRING(update_data_root, "", "Runtime", "Override update data path");
 REXCVAR_DEFINE_STRING(cache_root, "", "Runtime", "Override shader cache path");
 REXCVAR_DEFINE_STRING(metadata_root, "", "Runtime", "Override metadata path");
+REXCVAR_DEFINE_BOOL(mount_cache, true, "Filesystem",
+                    "Mount writable guest cache:, cache0:, and cache1: devices");
 
 namespace rex {
 
@@ -353,6 +355,45 @@ bool Runtime::SetupVfs() {
     }
   }
 
+  // Mount the Xbox cache devices as writable host directories. Some titles
+  // use cache: for required temporary state, not optional acceleration data.
+  // Register cache0: and cache1: before cache: to match Xenia and prevent the
+  // shorter cache: prefix from claiming their paths.
+  if (REXCVAR_GET(mount_cache)) {
+    const auto abs_user_root = std::filesystem::absolute(user_data_root_);
+    const struct {
+      const char* link;
+      const char* mount;
+      const char* directory;
+    } cache_mounts[] = {
+        {"cache0:", "\\CACHE0", "cache0"},
+        {"cache1:", "\\CACHE1", "cache1"},
+        {"cache:", "\\CACHE", "cache"},
+    };
+
+    for (const auto& cache_mount : cache_mounts) {
+      const auto host_path = abs_user_root / cache_mount.directory;
+      std::error_code ec;
+      std::filesystem::create_directories(host_path, ec);
+      if (ec) {
+        REXSYS_ERROR("Runtime::SetupVfs: Failed to create {} for {}: {}", host_path.string(),
+                     cache_mount.link, ec.message());
+        return false;
+      }
+
+      auto cache_device = std::make_unique<rex::filesystem::HostPathDevice>(
+          cache_mount.mount, host_path, false /* writable */);
+      if (!cache_device->Initialize() ||
+          !file_system_->RegisterDevice(std::move(cache_device)) ||
+          !file_system_->RegisterSymbolicLink(cache_mount.link, cache_mount.mount)) {
+        REXSYS_ERROR("Runtime::SetupVfs: Failed to mount {} at {}", host_path.string(),
+                     cache_mount.link);
+        return false;
+      }
+      REXSYS_INFO("  Mounted {} at {}", host_path.string(), cache_mount.link);
+    }
+  }
+
   // Setup NullDevice for raw HDD partition accesses
   // Cache/STFC code baked into games tries reading/writing to these
   // Using a NullDevice returns success to all IO requests, allowing games
@@ -366,10 +407,6 @@ bool Runtime::SetupVfs() {
     file_system_->RegisterDevice(std::move(null_device));
     REXSYS_DEBUG("  Registered NullDevice for \\Device\\Harddisk0\\{{Partition0,Cache0,Cache1}}");
   }
-
-  // NOTE: Do NOT register a device for cache: paths
-  // Games handle "device not found" gracefully but don't handle actual device
-  // errors (like NAME_COLLISION) well. Let cache: fail cleanly.
 
   return true;
 }
