@@ -527,6 +527,9 @@ struct alignas(0x40) PPCContext {
   /** Selected guest-memory range for filtered write provenance. */
   uint32_t memory_trace_address = 0;
   uint32_t memory_trace_length = 0;
+
+  /** Stop after a normal guest call that violates the nonvolatile GPR ABI. */
+  bool nonvolatile_gpr_guard = false;
 };
 
 /** Keep current_function correct across nested guest calls. */

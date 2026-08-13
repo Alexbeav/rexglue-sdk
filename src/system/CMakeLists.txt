@@ -41,6 +41,7 @@ set(REXSYSTEM_SOURCES
     mmio_handler.cpp
     map_parser.cpp
     memory_provenance.cpp
+    nonvolatile_gpr_guard.cpp
     module.cpp
     function_dispatcher.cpp
     gpu_plugin_loader.cpp

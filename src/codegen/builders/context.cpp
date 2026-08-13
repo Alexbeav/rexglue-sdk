@@ -200,7 +200,17 @@ void BuilderContext::emit_function_call(uint32_t address) {
         return;
       }
 
-      println("\t{}(ctx, base);", name);
+      // Save and restore helpers implement the ABI. A normal call must obey it.
+      if (name.find("__rest") == 0 || name.find("__save") == 0) {
+        println("\t{}(ctx, base);", name);
+      } else {
+        println(
+            "\t{{ rex::runtime::NonvolatileGprCallGuard rex_gpr_guard_(ctx, "
+            "0x{:08X}, 0x{:08X}, 0x{:08X});",
+            fn.base(), base, address);
+        println("\t{}(ctx, base);", name);
+        println("\trex_gpr_guard_.Check(ctx); }}");
+      }
       return;
     }
 
@@ -230,7 +240,12 @@ void BuilderContext::emit_function_call(uint32_t address) {
         std::replace(func_name.begin(), func_name.end(), '.', '_');
       }
 
+      println(
+          "\t{{ rex::runtime::NonvolatileGprCallGuard rex_gpr_guard_(ctx, "
+          "0x{:08X}, 0x{:08X}, 0x{:08X});",
+          fn.base(), base, address);
       println("\t{}(ctx, base);", func_name);
+      println("\trex_gpr_guard_.Check(ctx); }}");
       return;
     }
 

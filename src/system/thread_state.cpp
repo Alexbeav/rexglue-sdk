@@ -17,6 +17,7 @@
 #include <rex/logging.h>
 #include <rex/system/thread_state.h>
 #include <rex/system/memory_provenance.h>
+#include <rex/system/nonvolatile_gpr_guard.h>
 #include <rex/thread.h>
 
 namespace rex::runtime {
@@ -40,6 +41,7 @@ ThreadState::ThreadState(uint32_t thread_id, uint32_t stack_base, uint32_t pcr_a
   context_->r1.u64 = stack_base;    // Stack pointer
   context_->r13.u64 = pcr_address;  // PCR address
   ConfigureMemoryProvenanceContext(*context_);
+  ConfigureNonvolatileGprGuardContext(*context_);
 
   // Note(tomc): the rexglue abi passes memory base via 'base' parameter to each function call,
   // so we don't need to store it in the context like JIT did.

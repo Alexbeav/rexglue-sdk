@@ -38,6 +38,7 @@
 #include <rex/system/checkpoint.h>
 #include <rex/system/memory_provenance.h>
 #include <rex/system/mmio_handler.h>
+#include <rex/system/nonvolatile_gpr_guard.h>
 
 #include <atomic>
 #include <cassert>
