@@ -515,7 +515,7 @@ VoidResult registerEntryPoints(CodegenContext& ctx) {
     for (size_t i = 14; i <= endReg; i++) {
       uint32_t addr = base14 + static_cast<uint32_t>((i - 14) * stride);
       uint32_t size = static_cast<uint32_t>((endReg + 1 - i) * stride + extraSize);
-      graph.addFunction(addr, size, FunctionAuthority::HELPER, true);
+      graph.addFunction(addr, size, FunctionAuthority::HELPER, true, false);
       graph.setFunctionName(addr, fmt::format("{}{}", prefix, i));
     }
   };
@@ -532,7 +532,7 @@ VoidResult registerEntryPoints(CodegenContext& ctx) {
     for (size_t i = 64; i < 128; i++) {
       uint32_t addr = state.restVmx64Address + static_cast<uint32_t>((i - 64) * 8);
       uint32_t size = static_cast<uint32_t>((128 - i) * 8 + 4);
-      graph.addFunction(addr, size, FunctionAuthority::HELPER, true);
+      graph.addFunction(addr, size, FunctionAuthority::HELPER, true, false);
       graph.setFunctionName(addr, fmt::format("__restvmx_{}", i));
     }
   }
@@ -540,7 +540,7 @@ VoidResult registerEntryPoints(CodegenContext& ctx) {
     for (size_t i = 64; i < 128; i++) {
       uint32_t addr = state.saveVmx64Address + static_cast<uint32_t>((i - 64) * 8);
       uint32_t size = static_cast<uint32_t>((128 - i) * 8 + 4);
-      graph.addFunction(addr, size, FunctionAuthority::HELPER, true);
+      graph.addFunction(addr, size, FunctionAuthority::HELPER, true, false);
       graph.setFunctionName(addr, fmt::format("__savevmx_{}", i));
     }
   }
@@ -550,7 +550,10 @@ VoidResult registerEntryPoints(CodegenContext& ctx) {
   for (const auto& [address, cfg] : config.functions) {
     uint32_t size = cfg.getSize(address);
     std::string name = cfg.name.empty() ? fmt::format("sub_{:08X}", address) : cfg.name;
-    graph.addFunction(address, size, FunctionAuthority::CONFIG, true);
+    // Register-phase entries arrive before discovery creates unresolved jumps.
+    // Do not notify every earlier pending node for every entry in this batch.
+    // Large continuation censuses otherwise make this loop quadratic.
+    graph.addFunction(address, size, FunctionAuthority::CONFIG, true, false);
     graph.setFunctionName(address, name);
     configFuncs++;
 
@@ -642,7 +645,7 @@ VoidResult registerEntryPoints(CodegenContext& ctx) {
       }
     }
 
-    graph.addFunction(beginAddr, size, FunctionAuthority::PDATA, true);
+    graph.addFunction(beginAddr, size, FunctionAuthority::PDATA, true, false);
     graph.setFunctionHasExceptionHandler(beginAddr, fn.ExceptionFlag);
 
     if (exInfo && exInfo->info.hasInfo()) {
@@ -680,7 +683,7 @@ VoidResult registerEntryPoints(CodegenContext& ctx) {
     if (graph.isImport(addr))
       continue;
 
-    graph.addFunction(addr, 0, FunctionAuthority::DISCOVERED, true);
+    graph.addFunction(addr, 0, FunctionAuthority::DISCOVERED, true, false);
     ehFuncsQueued++;
   }
 
