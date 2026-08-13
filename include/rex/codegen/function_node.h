@@ -56,6 +56,7 @@ class FunctionNode {
   // Special type checks
   bool isImport() const { return authority_ == FunctionAuthority::IMPORT; }
   bool isHelper() const { return authority_ == FunctionAuthority::HELPER; }
+  bool isParentBackedAlias() const { return parentBackedAlias_; }
 
   //=========================================================================
   // State Machine - New 3-state model
@@ -73,6 +74,9 @@ class FunctionNode {
 
   /// Transition kRegistered -> kDiscovered for import functions (no blocks)
   void discoverAsImport();
+
+  /// Mark a configured continuation as an alias of an emitted parent body.
+  void discoverAsParentBackedAlias();
 
   /// Can transition from kDiscovered to kSealed?
   /// Returns true if:
@@ -195,6 +199,7 @@ class FunctionNode {
   FunctionAuthority authority_;
   FunctionState state_ = FunctionState::kRegistered;
   bool hasExceptionHandler_ = false;
+  bool parentBackedAlias_ = false;
 
   // Populated at discover()
   std::vector<Block> blocks_;

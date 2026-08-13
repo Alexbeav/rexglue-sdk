@@ -117,11 +117,21 @@ void FunctionNode::discoverAsImport() {
   REXCODEGEN_DEBUG("FunctionNode 0x{:08X} ({}): DISCOVERED as import", base_, name_);
 }
 
+void FunctionNode::discoverAsParentBackedAlias() {
+  assert(canDiscover() && "Invalid state transition: must be kRegistered");
+  assert(!isImport() && "Imports cannot be parent-backed aliases");
+
+  parentBackedAlias_ = true;
+  state_ = FunctionState::kDiscovered;
+  REXCODEGEN_TRACE("FunctionNode 0x{:08X} ({}): DISCOVERED as parent-backed alias", base_,
+                   name_);
+}
+
 bool FunctionNode::canSeal() const {
   if (state_ != FunctionState::kDiscovered)
     return false;
-  if (isImport())
-    return true;  // Imports can seal without blocks
+  if (isImport() || isParentBackedAlias())
+    return true;  // Imports and verified aliases can seal without blocks
   if (blocks_.empty())
     return false;  // Non-imports must have blocks
   if (!unresolvedJumps_.empty())

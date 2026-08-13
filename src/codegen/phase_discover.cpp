@@ -13,6 +13,7 @@
 #include "decoded_binary.h"
 #include <rex/codegen/function_scanner.h>
 
+#include <algorithm>
 #include <array>
 #include <bitset>
 #include <unordered_set>
@@ -59,6 +60,21 @@ void discoverFunction(CodegenContext& ctx, uint32_t funcAddr,
   if (node->isImport()) {
     node->discoverAsImport();
     return;
+  }
+
+  // A configured continuation inside an emitted parent block uses the
+  // parent's compiled body. Do not scan the same parent body again for every
+  // alias. The block check keeps declared-range gaps on the normal fail-closed
+  // discovery path.
+  auto aliasConfig = ctx.Config().functions.find(funcAddr);
+  if (aliasConfig != ctx.Config().functions.end() &&
+      aliasConfig->second.isChunk()) {
+    const auto* parent = graph.getFunction(aliasConfig->second.parent);
+    if (parent && !parent->canDiscover() &&
+        parent->containsBlockAddress(funcAddr)) {
+      node->discoverAsParentBackedAlias();
+      return;
+    }
   }
 
   REXCODEGEN_TRACE("Analyze: discovering function 0x{:08X} ({})", funcAddr, node->name());
@@ -436,6 +452,9 @@ size_t discoverPendingFunctions(CodegenContext& ctx,
       pending.push_back(addr);
     }
   }
+  // PDATA parents start before their configured continuation aliases.
+  // Stable address order lets one parent discovery validate all later aliases.
+  std::sort(pending.begin(), pending.end());
   for (uint32_t funcAddr : pending) {
     discoverFunction(ctx, funcAddr, knownFunctions);
   }
