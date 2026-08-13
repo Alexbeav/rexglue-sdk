@@ -15,6 +15,8 @@
 #include <rex/thread/fiber.h>
 
 #include <cassert>
+#include <cstdlib>
+#include <utility>
 
 namespace rex::thread {
 
@@ -34,7 +36,9 @@ Fiber* Fiber::ConvertCurrentThread() {
 
 Fiber* Fiber::Create(size_t stack_size, void (*entry)(void*), void* arg) {
   auto* f = new Fiber();
-  f->handle_ = ::CreateFiber(stack_size, reinterpret_cast<LPFIBER_START_ROUTINE>(entry), arg);
+  f->entry_ = entry;
+  f->arg_ = arg;
+  f->handle_ = ::CreateFiber(stack_size, &Fiber::Trampoline, nullptr);
   if (!f->handle_) {
     delete f;
     return nullptr;
@@ -42,9 +46,30 @@ Fiber* Fiber::Create(size_t stack_size, void (*entry)(void*), void* arg) {
   return f;
 }
 
+/*static*/ void __stdcall Fiber::Trampoline(void*) {
+  Fiber* f = tls_current_;
+  try {
+    f->entry_(f->arg_);
+  } catch (...) {
+    f->exception_ = std::current_exception();
+  }
+
+  if (f->return_fiber_) {
+    SwitchTo(f->return_fiber_);
+  }
+  std::terminate();
+}
+
 void Fiber::SwitchTo(Fiber* target) {
+  Fiber* from = tls_current_;
+  target->return_fiber_ = from;
   tls_current_ = target;
   ::SwitchToFiber(target->handle_);
+
+  if (target->exception_) {
+    auto exception = std::exchange(target->exception_, {});
+    std::rethrow_exception(exception);
+  }
 }
 
 void Fiber::Destroy() {

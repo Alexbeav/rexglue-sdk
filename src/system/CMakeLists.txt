@@ -8,6 +8,7 @@ set(REXSYSTEM_SOURCES
     kernel_module.cpp
     user_module.cpp
     xthread.cpp
+    guest_exception_report.cpp
     xevent.cpp
     xfile.cpp
     xmutant.cpp

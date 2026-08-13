@@ -15,7 +15,9 @@
 #include <rex/thread/fiber.h>
 
 #include <cassert>
+#include <cstdlib>
 #include <ucontext.h>
+#include <utility>
 
 namespace rex::thread {
 
@@ -53,13 +55,28 @@ Fiber* Fiber::Create(size_t stack_size, void (*entry)(void*), void* arg) {
 /*static*/ void Fiber::Trampoline() {
   // tls_current_ was updated by SwitchTo before swapcontext returned here.
   Fiber* f = tls_current_;
-  f->entry_(f->arg_);
+  try {
+    f->entry_(f->arg_);
+  } catch (...) {
+    f->exception_ = std::current_exception();
+  }
+
+  if (f->return_fiber_) {
+    SwitchTo(f->return_fiber_);
+  }
+  std::terminate();
 }
 
 void Fiber::SwitchTo(Fiber* target) {
   Fiber* from = tls_current_;
+  target->return_fiber_ = from;
   tls_current_ = target;
   swapcontext(&from->context_, &target->context_);
+
+  if (target->exception_) {
+    auto exception = std::exchange(target->exception_, {});
+    std::rethrow_exception(exception);
+  }
 }
 
 void Fiber::Destroy() {

@@ -12,6 +12,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include <rex/thread/fiber.h>
 
+#include <stdexcept>
+
 using rex::thread::Fiber;
 
 // Globals - fiber entry functions cannot capture closures.
@@ -23,6 +25,10 @@ static void counting_fiber(void*) {
   Fiber::SwitchTo(s_main);
   ++s_count;  // second resume
   Fiber::SwitchTo(s_main);
+}
+
+static void throwing_fiber(void*) {
+  throw std::runtime_error("guest fiber failure");
 }
 
 TEST_CASE("rex::thread::Fiber - basic context switch", "[fiber]") {
@@ -39,6 +45,17 @@ TEST_CASE("rex::thread::Fiber - basic context switch", "[fiber]") {
   // NOTE: Cleanup is not exception-safe. If a REQUIRE above fires, Catch2
   // throws and these Destroy() calls are skipped, leaking the host fiber
   // handles. Acceptable for a test-only scenario; fix if spurious failures occur.
+  f->Destroy();
+  s_main->Destroy();
+  s_main = nullptr;
+}
+
+TEST_CASE("rex::thread::Fiber - carries exceptions to the caller", "[fiber]") {
+  s_main = Fiber::ConvertCurrentThread();
+  auto* f = Fiber::Create(256 * 1024, throwing_fiber, nullptr);
+
+  REQUIRE_THROWS_AS(Fiber::SwitchTo(f), std::runtime_error);
+
   f->Destroy();
   s_main->Destroy();
   s_main = nullptr;

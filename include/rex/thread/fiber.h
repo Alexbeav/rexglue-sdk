@@ -13,6 +13,7 @@
 
 #include <rex/platform.h>
 #include <cstddef>
+#include <exception>
 
 #if REX_PLATFORM_LINUX || REX_PLATFORM_MAC
 #include <ucontext.h>
@@ -48,14 +49,19 @@ struct Fiber {
  private:
   static thread_local Fiber* tls_current_;
 
+  void (*entry_)(void*) = nullptr;
+  void* arg_ = nullptr;
+  std::exception_ptr exception_;
+  Fiber* return_fiber_ = nullptr;
+
 #if REX_PLATFORM_WIN32
   void* handle_ = nullptr;
   bool is_thread_fiber_ = false;
+
+  static void __stdcall Trampoline(void* unused);
 #elif REX_PLATFORM_LINUX
   ucontext_t context_{};
   std::vector<uint8_t> stack_;
-  void (*entry_)(void*) = nullptr;
-  void* arg_ = nullptr;
   bool is_thread_fiber_ = false;
 
   static void Trampoline();

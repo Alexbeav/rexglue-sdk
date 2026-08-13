@@ -14,6 +14,8 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
+#include <exception>
+#include <typeinfo>
 
 #include <fmt/format.h>
 
@@ -31,6 +33,7 @@
 #include <rex/system/kernel_state.h>
 #include <rex/system/checkpoint.h>
 #include <rex/system/function_dispatcher.h>
+#include <rex/system/guest_exception_report.h>
 #include <rex/system/thread_state.h>
 #include <rex/system/user_module.h>
 #include <rex/kernel/xboxkrnl/threading.h>
@@ -541,7 +544,21 @@ X_STATUS XThread::Create() {
     // Execute user code.
     current_xthread_tls_ = this;
     running_ = true;
-    Execute();
+    try {
+      Execute();
+    } catch (const std::exception& error) {
+      const auto report = MakeGuestExceptionReport(
+          thread_state_ ? thread_state_->context() : nullptr, thread_id_,
+          handle(), "std_exception", typeid(error).name(), error.what());
+      REXSYS_CRITICAL("{}", FormatGuestExceptionReport(report));
+      throw;
+    } catch (...) {
+      const auto report = MakeGuestExceptionReport(
+          thread_state_ ? thread_state_->context() : nullptr, thread_id_,
+          handle(), "unknown_exception", "unknown", "unknown C++ exception");
+      REXSYS_CRITICAL("{}", FormatGuestExceptionReport(report));
+      throw;
+    }
     running_ = false;
     current_xthread_tls_ = nullptr;
 
