@@ -54,6 +54,7 @@ Fiber* Fiber::Create(size_t stack_size, void (*entry)(void*), void* arg) {
     f->exception_ = std::current_exception();
   }
 
+  f->finished_ = true;
   if (f->return_fiber_) {
     SwitchTo(f->return_fiber_);
   }
@@ -61,6 +62,9 @@ Fiber* Fiber::Create(size_t stack_size, void (*entry)(void*), void* arg) {
 }
 
 void Fiber::SwitchTo(Fiber* target) {
+  if (!target || target->finished_) {
+    return;
+  }
   Fiber* from = tls_current_;
   target->return_fiber_ = from;
   tls_current_ = target;

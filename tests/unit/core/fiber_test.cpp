@@ -31,6 +31,10 @@ static void throwing_fiber(void*) {
   throw std::runtime_error("guest fiber failure");
 }
 
+static void returning_fiber(void*) {
+  ++s_count;
+}
+
 TEST_CASE("rex::thread::Fiber - basic context switch", "[fiber]") {
   s_count = 0;
   s_main = Fiber::ConvertCurrentThread();
@@ -41,10 +45,29 @@ TEST_CASE("rex::thread::Fiber - basic context switch", "[fiber]") {
   REQUIRE(s_count == 1);  // fiber ran, switched back
   Fiber::SwitchTo(f);
   REQUIRE(s_count == 2);  // fiber resumed, ran again, switched back
+  Fiber::SwitchTo(f);
+  REQUIRE(s_count == 2);  // fiber returned and resumed its caller
+  Fiber::SwitchTo(f);
+  REQUIRE(s_count == 2);  // switching to a completed fiber is a no-op
 
   // NOTE: Cleanup is not exception-safe. If a REQUIRE above fires, Catch2
   // throws and these Destroy() calls are skipped, leaking the host fiber
   // handles. Acceptable for a test-only scenario; fix if spurious failures occur.
+  f->Destroy();
+  s_main->Destroy();
+  s_main = nullptr;
+}
+
+TEST_CASE("rex::thread::Fiber - completed fiber cannot resume past its entry", "[fiber]") {
+  s_count = 0;
+  s_main = Fiber::ConvertCurrentThread();
+  auto* f = Fiber::Create(256 * 1024, returning_fiber, nullptr);
+
+  Fiber::SwitchTo(f);
+  REQUIRE(s_count == 1);
+  Fiber::SwitchTo(f);
+  REQUIRE(s_count == 1);
+
   f->Destroy();
   s_main->Destroy();
   s_main = nullptr;

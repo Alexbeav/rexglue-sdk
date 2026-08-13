@@ -53,6 +53,7 @@ struct Fiber {
   void* arg_ = nullptr;
   std::exception_ptr exception_;
   Fiber* return_fiber_ = nullptr;
+  bool finished_ = false;
 
 #if REX_PLATFORM_WIN32
   void* handle_ = nullptr;
