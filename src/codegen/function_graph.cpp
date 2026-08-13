@@ -362,10 +362,13 @@ void emit_print(std::string& out, fmt::format_string<Args...> fmt, Args&&... arg
 std::vector<std::pair<uint32_t, std::string>> FunctionNode::parentBackedAliases(
     const EmitContext& ctx) const {
   std::vector<std::pair<uint32_t, std::string>> parentBackedAliases;
-  for (const auto& [address, config] : ctx.config.functions) {
-    if (config.parent != base() || address == base() || !containsBlockAddress(address)) {
+  for (const auto address : ctx.graph.chunksForParent(base())) {
+    const auto configIt = ctx.config.functions.find(address);
+    if (configIt == ctx.config.functions.end() || address == base() ||
+        !containsBlockAddress(address)) {
       continue;
     }
+    const auto& config = configIt->second;
     const auto* aliasNode = ctx.graph.getFunction(address);
     std::string aliasName = config.name;
     if (aliasName.empty() && aliasNode && !aliasNode->name().empty()) {
@@ -1236,9 +1239,18 @@ void FunctionGraph::sealAll() {
 // Vacancy Checking
 //=============================================================================
 
-void FunctionGraph::registerChunk(uint32_t base, uint32_t size) {
+void FunctionGraph::registerChunk(uint32_t base, uint32_t size, uint32_t parent) {
   chunks_.emplace_back(base, size);
+  if (parent != 0) {
+    chunksByParent_[parent].push_back(base);
+  }
   REXCODEGEN_TRACE("FunctionGraph: registered chunk 0x{:08X}-0x{:08X}", base, base + size);
+}
+
+const std::vector<uint32_t>& FunctionGraph::chunksForParent(uint32_t parent) const {
+  static const std::vector<uint32_t> empty;
+  const auto it = chunksByParent_.find(parent);
+  return it == chunksByParent_.end() ? empty : it->second;
 }
 
 bool FunctionGraph::isVacant(uint32_t fromAddr, uint32_t targetAddr) const {

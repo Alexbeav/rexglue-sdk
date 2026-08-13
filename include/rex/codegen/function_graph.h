@@ -164,8 +164,12 @@ class FunctionGraph {
   // Set the memory reader for null-dword checking
   void setMemoryReader(MemoryReader reader) { memoryReader_ = std::move(reader); }
 
-  // Register a chunk (address range claimed by config, blocks vacancy)
-  void registerChunk(uint32_t base, uint32_t size);
+  // Register a chunk (address range claimed by config, blocks vacancy).
+  // A nonzero parent also indexes the chunk as a parent-backed alias.
+  void registerChunk(uint32_t base, uint32_t size, uint32_t parent = 0);
+
+  // Get the configured aliases for one parent without scanning all functions.
+  const std::vector<uint32_t>& chunksForParent(uint32_t parent) const;
 
   // Check if a region is vacant for absorption
   // fromAddr: the address we're expanding from (to check for null boundary)
@@ -193,6 +197,7 @@ class FunctionGraph {
       functionsByBase_;  // sorted by base for O(log f) interval lookup
   std::unordered_map<uint32_t, bool> functionHasXrefs_;  // entry -> hasXrefs
   std::vector<std::pair<uint32_t, uint32_t>> chunks_;    // base, size pairs
+  std::unordered_map<uint32_t, std::vector<uint32_t>> chunksByParent_;
   MemoryReader memoryReader_;
 
   // Notify all PENDING functions that a new function was added

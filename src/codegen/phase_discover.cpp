@@ -40,6 +40,19 @@ namespace {
 // Discover Phase: iterative function block discovery
 //=============================================================================
 
+std::unordered_set<uint32_t> buildDiscoveryBoundaries(const CodegenContext& ctx) {
+  auto boundaries = buildKnownFunctions(ctx.graph);
+  // A configured continuation is an entry into its parent body. It must not
+  // truncate that parent during discovery. The later emitted-block check
+  // decides whether the continuation can use the parent or needs its own scan.
+  for (const auto& [address, config] : ctx.Config().functions) {
+    if (config.isChunk()) {
+      boundaries.erase(address);
+    }
+  }
+  return boundaries;
+}
+
 void discoverFunction(CodegenContext& ctx, uint32_t funcAddr,
                       const std::unordered_set<uint32_t>& knownFunctions) {
   auto& graph = ctx.graph;
@@ -252,7 +265,7 @@ void discoverAllFunctions(CodegenContext& ctx) {
 
     lastFunctionCount = currentFunctionCount;
 
-    auto knownFunctions = buildKnownFunctions(graph);
+    auto knownFunctions = buildDiscoveryBoundaries(ctx);
     if (discoverPendingFunctions(ctx, knownFunctions) == 0) {
       break;
     }
@@ -292,7 +305,7 @@ void discoverAllFunctions(CodegenContext& ctx) {
       while (vtableIteration < maxVtableIterations) {
         vtableIteration++;
 
-        auto knownFunctions = buildKnownFunctions(graph);
+        auto knownFunctions = buildDiscoveryBoundaries(ctx);
         if (discoverPendingFunctions(ctx, knownFunctions) == 0)
           break;
 

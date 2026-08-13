@@ -60,6 +60,10 @@ TEST_CASE("A continuation alias uses its parent's discovered body", "[codegen][g
   config.functions[0x4040].parent = 0x4000;
   config.functions[0x4080].parent = 0x4000;
   config.functions[0x4040].name = "named_continuation";
+  config.functions[0x9000].parent = 0x8000;
+  graph.registerChunk(0x4040, 0x40, 0x4000);
+  graph.registerChunk(0x4080, 0x40, 0x4000);
+  graph.registerChunk(0x9000, 0x40, 0x8000);
 
   EmitContext emitContext{binary, config, graph};
   const auto aliases = parent->parentBackedAliases(emitContext);
