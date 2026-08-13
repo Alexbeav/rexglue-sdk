@@ -43,8 +43,8 @@
     if (!rex_indirect_func_) [[unlikely]] {                                                \
       rex_indirect_func_ = rex::runtime::ResolveIndirectFunction(rex_indirect_target_);    \
     }                                                                                      \
-    rex::runtime::NonvolatileGprCallGuard rex_gpr_guard_(                                  \
-        ctx, ctx.current_function, ctx.current_instruction, rex_indirect_target_);          \
+    uint32_t rex_gpr_guard_ = rex::runtime::BeginNonvolatileGprCall(                       \
+        ctx, ctx.current_function, ctx.current_instruction, rex_indirect_target_);         \
     rex_indirect_func_(ctx, base);                                                         \
-    rex_gpr_guard_.Check(ctx);                                                             \
+    rex::runtime::EndNonvolatileGprCall(ctx, rex_gpr_guard_);                              \
   } while (0)

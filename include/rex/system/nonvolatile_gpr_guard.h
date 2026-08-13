@@ -37,24 +37,11 @@ struct NonvolatileGprSnapshot {
   NonvolatileGprDifference FindFirstDifference(const PPCContext& context) const noexcept;
 };
 
-/**
- * Check one normal guest-call return against the PPC ABI.
- *
- * The generator does not use this guard for compiler save and restore helpers.
- */
-class NonvolatileGprCallGuard {
- public:
-  NonvolatileGprCallGuard(const PPCContext& context, uint32_t caller, uint32_t callsite,
-                          uint32_t target) noexcept;
+/** Start one normal guest-call ABI check. Zero means that the guard is disabled. */
+uint32_t BeginNonvolatileGprCall(const PPCContext& context, uint32_t caller, uint32_t callsite,
+                                 uint32_t target) noexcept;
 
-  void Check(const PPCContext& context) const noexcept;
-
- private:
-  bool enabled_ = false;
-  uint32_t caller_ = 0;
-  uint32_t callsite_ = 0;
-  uint32_t target_ = 0;
-  NonvolatileGprSnapshot snapshot_{};
-};
+/** Finish one normal guest-call ABI check. */
+void EndNonvolatileGprCall(const PPCContext& context, uint32_t token) noexcept;
 
 }  // namespace rex::runtime

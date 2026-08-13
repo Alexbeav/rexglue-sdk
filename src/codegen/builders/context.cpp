@@ -205,11 +205,11 @@ void BuilderContext::emit_function_call(uint32_t address) {
         println("\t{}(ctx, base);", name);
       } else {
         println(
-            "\t{{ rex::runtime::NonvolatileGprCallGuard rex_gpr_guard_(ctx, "
+            "\t{{ uint32_t rex_gpr_guard_ = rex::runtime::BeginNonvolatileGprCall(ctx, "
             "0x{:08X}, 0x{:08X}, 0x{:08X});",
             fn.base(), base, address);
         println("\t{}(ctx, base);", name);
-        println("\trex_gpr_guard_.Check(ctx); }}");
+        println("\trex::runtime::EndNonvolatileGprCall(ctx, rex_gpr_guard_); }}");
       }
       return;
     }
@@ -241,11 +241,11 @@ void BuilderContext::emit_function_call(uint32_t address) {
       }
 
       println(
-          "\t{{ rex::runtime::NonvolatileGprCallGuard rex_gpr_guard_(ctx, "
+          "\t{{ uint32_t rex_gpr_guard_ = rex::runtime::BeginNonvolatileGprCall(ctx, "
           "0x{:08X}, 0x{:08X}, 0x{:08X});",
           fn.base(), base, address);
       println("\t{}(ctx, base);", func_name);
-      println("\trex_gpr_guard_.Check(ctx); }}");
+      println("\trex::runtime::EndNonvolatileGprCall(ctx, rex_gpr_guard_); }}");
       return;
     }
 
