@@ -99,6 +99,22 @@ X_HRESULT XamApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
                     (uint32_t)data->unk_04);
       return X_E_SUCCESS;
     }
+    case 0x0002B003: {
+      // Used by Forza Horizon during the controller-card transition. The title
+      // passes a three-qword input payload while reporting a zero buffer length.
+      // (Ported from pinyon-shift patch 0001.)
+      struct message_data {
+        rex::be<uint64_t> unk_00;
+        rex::be<uint64_t> unk_08;
+        rex::be<uint64_t> unk_10;
+      }* data = reinterpret_cast<message_data*>(buffer);
+      if (!data) {
+        return X_E_INVALIDARG;
+      }
+      REXKRNL_DEBUG("XamApp(0x0002B003)({:016X}, {:016X}, {:016X})", (uint64_t)data->unk_00,
+                    (uint64_t)data->unk_08, (uint64_t)data->unk_10);
+      return X_E_SUCCESS;
+    }
   }
   REXKRNL_ERROR(
       "Unimplemented XAM message app={:08X}, msg={:08X}, arg1={:08X}, "
