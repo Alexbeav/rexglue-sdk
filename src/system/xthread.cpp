@@ -758,7 +758,9 @@ void XThread::Execute() {
 
     try {
       REXSYS_NOISY_DEBUG("XThread::Execute - Calling function at {:08X}", next_address);
+      ctx->dispatch_address = next_address;
       func(*ctx, base);
+      ctx->dispatch_address = 0;
       if (nonlocal_dispatch) {
         // ReenterException unwinds the direct C++ call chain. A resumed
         // fragment therefore returns to this dispatcher, not its former host

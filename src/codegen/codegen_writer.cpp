@@ -70,9 +70,22 @@ nlohmann::json buildTemplateData(const rex::codegen::CodegenContext& ctx,
       funcName = fmt::format("sub_{:08X}", fn->base());
     }
 
+    // Interior-PC resume aliases: return PCs after linked branches inside this
+    // function. Skip any that coincide with another explicit function entry.
+    nlohmann::json resumeAliases = nlohmann::json::array();
+    if (fn->authority() != rex::codegen::FunctionAuthority::IMPORT) {
+      for (uint32_t address : fn->resumableReturnAddresses(ctx.binary())) {
+        const auto* explicitEntry = ctx.graph.getFunction(address);
+        if (!explicitEntry || explicitEntry == fn) {
+          resumeAliases.push_back(fmt::format("0x{:X}", address));
+        }
+      }
+    }
+
     functionsJson.push_back({
         {"address", fmt::format("0x{:X}", fn->base())},
         {"name", funcName},
+        {"resume_aliases", std::move(resumeAliases)},
         {"is_rexcrt", isRexcrt},
         {"below_code_base", (fn->base() < codeMin)},
         {"is_import", fn->authority() == rex::codegen::FunctionAuthority::IMPORT},

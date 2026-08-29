@@ -102,6 +102,11 @@ class FunctionNode {
   /// For normal functions: emits REX_FUNC with blocks and instructions
   std::string emitCpp(const EmitContext& ctx) const;
 
+  /// Return PCs immediately following linked branches inside this function's
+  /// emitted blocks. Each one is registered as a dispatch-table alias of this
+  /// function and can resume it mid-body (interior-PC resume).
+  std::vector<uint32_t> resumableReturnAddresses(const BinaryView& binary) const;
+
   /// Return configured continuation entries that can use this compiled body.
   std::vector<std::pair<uint32_t, std::string>> parentBackedAliases(
       const EmitContext& ctx) const;

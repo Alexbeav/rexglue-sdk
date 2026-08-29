@@ -383,6 +383,40 @@ std::vector<std::pair<uint32_t, std::string>> FunctionNode::parentBackedAliases(
   return parentBackedAliases;
 }
 
+std::vector<uint32_t> FunctionNode::resumableReturnAddresses(const BinaryView& binary) const {
+  std::vector<uint32_t> addresses;
+  if (isImport() || isParentBackedAlias()) {
+    return addresses;
+  }
+  for (const auto& block : blocks()) {
+    const auto* blockData = binary.translate(block.base);
+    if (!blockData) {
+      continue;
+    }
+    for (uint32_t address = block.base; address < block.end(); address += 4) {
+      const uint32_t instruction = load_and_swap<uint32_t>(blockData + (address - block.base));
+      const uint32_t opcode = PPC_OP(instruction);
+      const uint32_t extendedOpcode = PPC_XOP(instruction);
+      // Only genuine linked branches: bl/bla (18), bcl (16), bclrl (19/16),
+      // bcctrl (19/528). PPC_BL alone is just "bit 0 set".
+      const bool isLinkedBranch =
+          PPC_BL(instruction) &&
+          (opcode == 18 || opcode == 16 ||
+           (opcode == 19 && (extendedOpcode == 16 || extendedOpcode == 528)));
+      if (!isLinkedBranch) {
+        continue;
+      }
+      const uint32_t returnAddress = address + 4;
+      if (containsEmittedAddress(returnAddress)) {
+        addresses.push_back(returnAddress);
+      }
+    }
+  }
+  std::sort(addresses.begin(), addresses.end());
+  addresses.erase(std::unique(addresses.begin(), addresses.end()), addresses.end());
+  return addresses;
+}
+
 std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
   if (authority() == FunctionAuthority::IMPORT) {
     return "";
@@ -517,6 +551,28 @@ std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
     labels.emplace(address);
   }
 
+  // Interior-PC resume: every return PC after a linked branch is a label and a
+  // dispatch-table alias of this function, so a guest continuation can enter
+  // mid-body without a per-address configuration entry.
+  auto resumeAddresses = resumableReturnAddresses(ctx.binary);
+  {
+    // A configured parent-backed alias already owns its case label; the
+    // function base is the default entry. Neither may appear twice in the
+    // entry switch.
+    std::unordered_set<uint32_t> configuredEntries;
+    configuredEntries.insert(base());
+    for (const auto& [address, aliasName] : parentBackedAliases) {
+      configuredEntries.insert(address);
+    }
+    std::erase_if(resumeAddresses, [&](uint32_t address) {
+      return configuredEntries.contains(address);
+    });
+  }
+  for (uint32_t address : resumeAddresses) {
+    labels.emplace(address);
+  }
+  const bool hasEntrySelector = !parentBackedAliases.empty() || !resumeAddresses.empty();
+
   // A reentry chunk can reach blocks before its configured entry. Blocks are
   // emitted in address order, so jump over those blocks on initial entry.
   const bool hasEarlierBlock =
@@ -548,11 +604,35 @@ std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
   // Function signature with weak/alias pattern
   emit_println(out, "DEFINE_REX_FUNC({}) {{", name);
   emit_println(out, "\tREX_FUNC_PROLOGUE();");
-  if (!parentBackedAliases.empty()) {
-    emit_println(out, "\tconst uint32_t rex_entry = rex_entry_{:08X};", base());
-    emit_println(out, "\trex_entry_{:08X} = 0x{:08X};", base(), base());
+  if (hasEntrySelector) {
+    if (!parentBackedAliases.empty()) {
+      emit_println(out, "\tuint32_t rex_entry = rex_entry_{:08X};", base());
+      emit_println(out, "\trex_entry_{:08X} = 0x{:08X};", base(), base());
+    } else {
+      emit_println(out, "\tuint32_t rex_entry = 0x{:08X};", base());
+    }
+    // Table-based dispatch (thread start, host callbacks, indirect calls,
+    // nonlocal reentry) requests an address through ctx.dispatch_address.
+    // Accept it only when it is one of this body's registered entries.
+    emit_println(out, "\t{{");
+    emit_println(out, "\t\tconst uint32_t rex_dispatch_address = ctx.dispatch_address;");
+    emit_println(out, "\t\tctx.dispatch_address = 0;");
+    emit_println(out, "\t\tif (rex_entry == 0x{:08X}) {{", base());
+    emit_println(out, "\t\t\tswitch (rex_dispatch_address) {{");
+    for (const auto& [address, aliasName] : parentBackedAliases) {
+      emit_println(out, "\t\t\t\tcase 0x{:08X}:", address);
+    }
+    for (uint32_t address : resumeAddresses) {
+      emit_println(out, "\t\t\t\tcase 0x{:08X}:", address);
+    }
+    emit_println(out, "\t\t\t\t\trex_entry = rex_dispatch_address; break;");
+    emit_println(out, "\t\t\t\tdefault: break;");
+    emit_println(out, "\t\t\t}}");
+    emit_println(out, "\t\t}}");
+    emit_println(out, "\t}}");
     emit_println(out, "\trex::system::PollCheckpointBoundary(ctx, rex_entry);");
   } else {
+    emit_println(out, "\tctx.dispatch_address = 0;");
     emit_println(out, "\trex::system::PollCheckpointBoundary(ctx, 0x{:08X});", base());
   }
   emit_println(out, "\tconst uint32_t rex_entry_lr_ = uint32_t(ctx.lr);");
@@ -561,7 +641,7 @@ std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
   // Do not use an RAII scope here. Its destructor prevents native tail-call
   // elimination across guest calls and can exhaust the native stack.
   emit_println(out, "\tctx.current_function = 0x{:08X};", base());
-  if (!parentBackedAliases.empty()) {
+  if (hasEntrySelector) {
     emit_println(out, "\tctx.current_instruction = rex_entry;");
   } else {
     emit_println(out, "\tctx.current_instruction = 0x{:08X};", base());
@@ -775,9 +855,12 @@ std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
   // If SEH, emit SEH_TRY and indent body
   if (generateSeh) {
     emit_println(out, "\tSEH_TRY {{");
-    if (!parentBackedAliases.empty()) {
+    if (hasEntrySelector) {
       emit_println(out, "\t\tswitch (rex_entry) {{");
       for (const auto& [address, aliasName] : parentBackedAliases) {
+        emit_println(out, "\t\t\tcase 0x{:08X}: goto loc_{:X};", address, address);
+      }
+      for (uint32_t address : resumeAddresses) {
         emit_println(out, "\t\t\tcase 0x{:08X}: goto loc_{:X};", address, address);
       }
       emit_println(out, "\t\t\tdefault: break;");
@@ -793,9 +876,12 @@ std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
     }
     out += indentedBody;
   } else {
-    if (!parentBackedAliases.empty()) {
+    if (hasEntrySelector) {
       emit_println(out, "\tswitch (rex_entry) {{");
       for (const auto& [address, aliasName] : parentBackedAliases) {
+        emit_println(out, "\t\tcase 0x{:08X}: goto loc_{:X};", address, address);
+      }
+      for (uint32_t address : resumeAddresses) {
         emit_println(out, "\t\tcase 0x{:08X}: goto loc_{:X};", address, address);
       }
       emit_println(out, "\t\tdefault: break;");

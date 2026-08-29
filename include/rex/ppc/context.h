@@ -309,6 +309,14 @@ struct alignas(0x40) PPCContext {
    * to a local variable via REX_CONFIG_CTR_AS_LOCAL.
    */
   uint32_t last_indirect_target = 0;
+
+  /**
+   * Guest address requested by table-based dispatch. Generated functions
+   * consume this on entry so a saved LR that points immediately after a
+   * linked call can resume inside its owning AOT function (interior-PC
+   * resume aliases). Zero means normal entry.
+   */
+  uint32_t dispatch_address = 0;
   uint32_t last_indirect_caller = 0;
   uint32_t last_indirect_callsite = 0;
   uint32_t last_indirect_r3 = 0;

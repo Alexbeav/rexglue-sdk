@@ -31,6 +31,7 @@ rex::memory::Memory& GetTestMemory() {
 }
 
 void DummyFn(PPCContext&, uint8_t*) {}
+void OtherDummyFn(PPCContext&, uint8_t*) {}
 
 }  // namespace
 
@@ -59,6 +60,28 @@ TEST_CASE("FunctionDispatcher: caller_address routes thunk to caller's module po
 
   CHECK(dispatcher.GetFunction(thunk_a) == &DummyFn);
   CHECK(dispatcher.GetFunction(thunk_b) == &DummyFn);
+}
+
+TEST_CASE("FunctionDispatcher: repeated allocation reuses a module-local thunk",
+          "[runtime][dispatcher]") {
+  auto& memory = GetTestMemory();
+  rex::runtime::ExportResolver resolver;
+  rex::runtime::FunctionDispatcher dispatcher(&memory, &resolver);
+
+  constexpr uint32_t kModA = 0x87000000u;
+  constexpr uint32_t kCodeSize = 0x10000u;
+  constexpr uint32_t kImageSize = 0x100000u;
+  REQUIRE(dispatcher.InitializeFunctionTable(kModA, kCodeSize, kModA, kImageSize));
+
+  const uint32_t first = dispatcher.AllocateThunk(&DummyFn, kModA + 0x100);
+  const uint32_t repeated = dispatcher.AllocateThunk(&DummyFn, kModA + 0x200);
+  const uint32_t other = dispatcher.AllocateThunk(&OtherDummyFn, kModA + 0x100);
+
+  REQUIRE(first != 0);
+  CHECK(repeated == first);
+  CHECK(other == first + 4);
+  CHECK(dispatcher.GetFunction(first) == &DummyFn);
+  CHECK(dispatcher.GetFunction(other) == &OtherDummyFn);
 }
 
 TEST_CASE("FunctionDispatcher: AllocateThunk(0) uses the entrypoint pool only when explicit",

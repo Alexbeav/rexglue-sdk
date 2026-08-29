@@ -21,5 +21,6 @@ const rex::PPCImageInfo PPCImageConfig = {
 
 PPCFuncMapping PPCFuncMappings[] = {
 {% for fn in functions %}{% if not fn.below_code_base or fn.is_import %}	{ {{ fn.address }}, {{ fn.name }} },
-{% endif %}{% endfor %}	{ 0, nullptr }
+{% for alias in fn.resume_aliases %}	{ {{ alias }}, {{ fn.name }} },
+{% endfor %}{% endif %}{% endfor %}	{ 0, nullptr }
 };

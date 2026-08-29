@@ -89,7 +89,9 @@ bool FunctionDispatcher::Execute(ThreadState* thread_state, uint32_t address) {
   uint64_t previous_lr = ctx->lr;
   ctx->lr = 0xBCBCBCBC;
 
+  ctx->dispatch_address = address;
   fn(*ctx, memory_->virtual_membase());
+  ctx->dispatch_address = 0;
 
   ctx->lr = previous_lr;
   ctx->r1.u64 += 64 + 112;
@@ -294,6 +296,10 @@ bool FunctionDispatcher::SetFunction(uint32_t guest_address, ::PPCFunc* func) {
 
 uint32_t FunctionDispatcher::AllocateThunk(::PPCFunc* func, uint32_t caller_address) {
   std::lock_guard<std::recursive_mutex> lock(dispatch_mutex_);
+  if (!func) {
+    REXLOG_ERROR("AllocateThunk: function is null");
+    return 0;
+  }
   auto* mod = FindModuleByAddress(caller_address);
   if (!mod) {
     if (caller_address != 0) {
@@ -313,6 +319,11 @@ uint32_t FunctionDispatcher::AllocateThunk(::PPCFunc* func, uint32_t caller_addr
     }
   }
 
+  auto existing = mod->thunk_addresses.find(func);
+  if (existing != mod->thunk_addresses.end()) {
+    return existing->second;
+  }
+
   if (mod->next_thunk_address >= mod->thunk_limit) {
     REXLOG_ERROR("Thunk address space exhausted for module at {:08X}", mod->code_base);
     return 0;
@@ -323,6 +334,7 @@ uint32_t FunctionDispatcher::AllocateThunk(::PPCFunc* func, uint32_t caller_addr
     mod->next_thunk_address -= 4;
     return 0;
   }
+  mod->thunk_addresses.emplace(func, addr);
   return addr;
 }
 

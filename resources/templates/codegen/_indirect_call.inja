@@ -45,6 +45,8 @@
     }                                                                                      \
     uint32_t rex_gpr_guard_ = rex::runtime::BeginNonvolatileGprCall(                       \
         ctx, ctx.current_function, ctx.current_instruction, rex_indirect_target_);         \
+    ctx.dispatch_address = rex_indirect_target_;                                           \
     rex_indirect_func_(ctx, base);                                                         \
+    ctx.dispatch_address = 0;                                                              \
     rex::runtime::EndNonvolatileGprCall(ctx, rex_gpr_guard_);                              \
   } while (0)
