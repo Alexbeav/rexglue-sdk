@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <atomic>
 #include <cinttypes>
 #include <cmath>
 #include <cstring>
@@ -50,8 +51,17 @@ REXCVAR_DEFINE_STRING(readback_resolve, "none", "GPU",
                       " none: Disable readback (default)\n"
                       " fast: Read previous frame (delayed, copy every frame)\n"
                       " some: Read previous frame (delayed, copy on cache miss)\n"
-                      " full: Immediate sync readback (accurate but stalls)")
-    .allowed({"none", "fast", "some", "full"})
+                      " full: Immediate sync readback (accurate but stalls)\n"
+                      " auto: Sync readback for one-shot resolves, skip per-frame recurring ones")
+    .allowed({"none", "fast", "some", "full", "auto"})
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_INT32(readback_resolve_max_kb, 0, "GPU",
+                     "Skip CPU resolve readback for resolves larger than this many KB "
+                     "(0 = no limit). Small render-to-texture targets (e.g. UI thumbnails) "
+                     "still read back correctly while fullscreen resolves skip the per-frame "
+                     "copy cost.")
+    .range(0, 1 << 20)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_BOOL(readback_resolve_half_pixel_offset, false, "GPU",
@@ -92,6 +102,9 @@ ReadbackResolveMode ParseReadbackResolveMode(std::string_view value) {
   }
   if (value == "some") {
     return ReadbackResolveMode::kSome;
+  }
+  if (value == "auto") {
+    return ReadbackResolveMode::kAuto;
   }
   if (value == "full") {
     return ReadbackResolveMode::kFull;
@@ -253,6 +266,11 @@ ReadbackResolveMode CommandProcessor::GetReadbackResolveMode(
   }
   return legacy_readback_resolve_enabled ? ReadbackResolveMode::kFast
                                          : ReadbackResolveMode::kDisabled;
+}
+
+uint32_t CommandProcessor::GetReadbackResolveSizeLimit() const {
+  const int32_t max_kb = REXCVAR_GET(readback_resolve_max_kb);
+  return max_kb > 0 ? uint32_t(max_kb) * 1024u : UINT32_MAX;
 }
 
 bool CommandProcessor::IsReadbackMemexportEnabled(bool legacy_backend_flag) const {
@@ -1529,6 +1547,22 @@ bool CommandProcessor::ExecutePacketType3Draw(memory::RingBuffer* reader, uint32
         auto vgt_output_path_cntl = register_file_->Get<reg::VGT_OUTPUT_PATH_CNTL>();
         auto vgt_hos_cntl = register_file_->Get<reg::VGT_HOS_CNTL>();
         auto rb_modecontrol = register_file_->Get<reg::RB_MODECONTROL>();
+        static std::atomic_flag first_failed_draw_logged = ATOMIC_FLAG_INIT;
+        if (!first_failed_draw_logged.test_and_set(std::memory_order_relaxed)) {
+          REXGPU_ERROR(
+              "M3_TRACE draw.failure.first opcode={} packet=0x{:08X} "
+              "initiator=0x{:08X} num_indices={} prim_type={} source_select={} index_size={} "
+              "major_mode={} explicit_major={} output_path=0x{:08X} path_select={} "
+              "hos_control=0x{:08X} tess_mode={} rb_modecontrol=0x{:08X} edram_mode={}",
+              opcode_name, packet, vgt_draw_initiator.value,
+              uint32_t(vgt_draw_initiator.num_indices),
+              uint32_t(vgt_draw_initiator.prim_type), uint32_t(vgt_draw_initiator.source_select),
+              uint32_t(vgt_draw_initiator.index_size), uint32_t(vgt_draw_initiator.major_mode),
+              uint32_t(major_mode_explicit), vgt_output_path_cntl.value,
+              uint32_t(vgt_output_path_cntl.path_select), vgt_hos_cntl.value,
+              uint32_t(vgt_hos_cntl.tess_mode), rb_modecontrol.value,
+              uint32_t(rb_modecontrol.edram_mode));
+        }
         REXGPU_ERROR(
             "{}({}, {}, {}): Failed in backend "
             "(major_mode={}, explicit_major={}, path_select={}, tess_mode={}, edram_mode={})",

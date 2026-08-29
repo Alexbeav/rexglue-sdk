@@ -388,8 +388,17 @@ class D3D12CommandProcessor : public CommandProcessor {
     uint32_t written_size[2] = {0, 0};
     uint32_t current_index = 0;
     uint64_t last_used_frame = 0;
+    // Consecutive frames this resolve key has recurred (for kAuto skipping).
+    uint32_t recur_streak = 0;
   };
   void EvictOldReadbackBuffers(std::unordered_map<uint64_t, ReadbackBuffer>& buffer_map);
+  // Windowed resolve-readback traffic stats (CP thread only).
+  uint64_t rb_stat_window_start_frame_ = 0;
+  uint32_t rb_stat_requests_ = 0;
+  uint32_t rb_stat_skips_ = 0;
+  uint32_t rb_stat_sync_waits_ = 0;
+  uint64_t rb_stat_wait_us_ = 0;
+  std::unordered_map<uint64_t, uint32_t> rb_stat_key_counts_;
   static constexpr uint32_t kReadbackBufferSizeIncrement = 16 * 1024 * 1024;
   static constexpr size_t kMaxReadbackBuffers = 256;
   static constexpr uint64_t kReadbackBufferEvictionAgeFrames = 60;

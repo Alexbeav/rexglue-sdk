@@ -45,6 +45,10 @@ enum class ReadbackResolveMode {
   kFast,
   kSome,
   kFull,
+  // Synchronous accurate readback for one-shot resolves (thumbnails, livery
+  // composites), skipping resolve keys that recur frame-after-frame
+  // (steady-state consumers whose per-frame readback would serialize GPU/CPU).
+  kAuto,
 };
 
 struct SwapState {
@@ -243,6 +247,8 @@ class CommandProcessor {
 
   // Shared readback resolve mode with backend legacy-flag alias support.
   ReadbackResolveMode GetReadbackResolveMode(bool legacy_readback_resolve_enabled) const;
+  // Upper bound in bytes for CPU resolve readback (UINT32_MAX = no limit).
+  uint32_t GetReadbackResolveSizeLimit() const;
   // Shared memexport readback enable state with backend legacy-flag override support.
   bool IsReadbackMemexportEnabled(bool legacy_backend_flag) const;
 

@@ -2945,10 +2945,70 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
     return true;
   }
 
+  // Resolve already ran on the GPU above; large targets skip only the CPU copy.
+  if (written_length > GetReadbackResolveSizeLimit()) {
+    return true;
+  }
+
   bool is_scaled = texture_cache_->IsDrawResolutionScaled();
   uint64_t resolve_key = MakeReadbackResolveKey(written_address, written_length);
   ReadbackBuffer& rb = readback_buffers_[resolve_key];
+  // A key that keeps recurring within a few frames is a steady-state consumer;
+  // kAuto skips its readback so only one-shot resolves (thumbnails, livery
+  // composites) pay the synchronous-accuracy cost. The gap allows for
+  // double-buffered consumers that alternate between two addresses and
+  // therefore recur every other frame rather than every frame.
+  constexpr uint64_t kAutoRecurMaxGapFrames = 4;
+  if (rb.last_used_frame != 0 &&
+      frame_current_ - rb.last_used_frame <= kAutoRecurMaxGapFrames) {
+    ++rb.recur_streak;
+  } else {
+    rb.recur_streak = 0;
+  }
   rb.last_used_frame = frame_current_;
+  constexpr uint32_t kAutoSkipStreak = 3;
+  bool auto_skip =
+      GetReadbackResolveMode(REXCVAR_GET(d3d12_readback_resolve)) == ReadbackResolveMode::kAuto &&
+      rb.recur_streak >= kAutoSkipStreak;
+
+  // Windowed readback traffic stats (CP thread only): what does the resolve
+  // stream actually look like — how many requests, distinct keys, skips, and
+  // synchronous waits, and who are the top offenders.
+  {
+    ++rb_stat_requests_;
+    ++rb_stat_key_counts_[resolve_key];
+    if (auto_skip) {
+      ++rb_stat_skips_;
+    }
+    if (rb_stat_window_start_frame_ == 0) {
+      rb_stat_window_start_frame_ = frame_current_;
+    }
+    if (frame_current_ - rb_stat_window_start_frame_ >= 300) {
+      std::string top;
+      uint32_t shown = 0;
+      std::vector<std::pair<uint64_t, uint32_t>> sorted(rb_stat_key_counts_.begin(),
+                                                        rb_stat_key_counts_.end());
+      std::sort(sorted.begin(), sorted.end(),
+                [](const auto& a, const auto& b) { return a.second > b.second; });
+      for (const auto& [key, count] : sorted) {
+        if (shown++ >= 3) break;
+        top += fmt::format(" [{:08X}+{:X}]x{}", uint32_t(key >> 32), uint32_t(key), count);
+      }
+      REXGPU_INFO(
+          "readback stats/300f: {} requests, {} keys, {} auto-skips, {} sync waits, {} ms "
+          "waiting; top:{}",
+          rb_stat_requests_, rb_stat_key_counts_.size(), rb_stat_skips_, rb_stat_sync_waits_,
+          rb_stat_wait_us_ / 1000, top);
+      rb_stat_requests_ = rb_stat_skips_ = rb_stat_sync_waits_ = 0;
+      rb_stat_wait_us_ = 0;
+      rb_stat_key_counts_.clear();
+      rb_stat_window_start_frame_ = frame_current_;
+    }
+  }
+
+  if (auto_skip) {
+    return true;
+  }
 
   uint32_t write_index = rb.current_index;
   uint32_t size = AlignReadbackBufferSize(written_length);
@@ -3119,8 +3179,16 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
   uint32_t read_index = write_index;
   if (use_delayed_sync) {
     read_index = 1 - write_index;
-  } else if (!AwaitAllQueueOperationsCompletion()) {
-    return true;
+  } else {
+    const auto wait_begin = std::chrono::steady_clock::now();
+    const bool wait_ok = AwaitAllQueueOperationsCompletion();
+    ++rb_stat_sync_waits_;
+    rb_stat_wait_us_ += uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
+                                     std::chrono::steady_clock::now() - wait_begin)
+                                     .count());
+    if (!wait_ok) {
+      return true;
+    }
   }
 
   bool is_cache_miss = false;
@@ -3128,7 +3196,13 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
                            !rb.mapped_data[read_index])) {
     is_cache_miss = true;
     read_index = write_index;
-    if (!AwaitAllQueueOperationsCompletion()) {
+    const auto wait_begin = std::chrono::steady_clock::now();
+    const bool wait_ok = AwaitAllQueueOperationsCompletion();
+    ++rb_stat_sync_waits_;
+    rb_stat_wait_us_ += uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
+                                     std::chrono::steady_clock::now() - wait_begin)
+                                     .count());
+    if (!wait_ok) {
       return true;
     }
   }
