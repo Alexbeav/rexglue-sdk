@@ -39,6 +39,13 @@ REXCVAR_DEFINE_STRING(swap_post_effect, "none", "GPU", "Swap post effect: none, 
     .allowed({"none", "fxaa", "fxaa_extreme"})
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
+REXCVAR_DEFINE_INT32(vblank_frequency_override, 0, "GPU",
+                     "Override the guest vblank frequency in Hz (0 = video mode refresh rate). "
+                     "A title that presents every other vblank runs at half this rate, so 120 "
+                     "gives a 30fps-locked title a paced 60fps. Only applies while vsync is on.")
+    .range(0, 1000)
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
 REXCVAR_DEFINE_BOOL(store_shaders, true, "GPU",
                     "Store shaders persistently and load them when loading games to avoid "
                     "runtime spikes and freezes when playing the game not for the first time.");
@@ -157,6 +164,10 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
         system::X_VIDEO_MODE video_mode;
         kernel::xboxkrnl::VdQueryVideoMode(&video_mode);
         double refresh_rate_hz = std::max(1.0, double(float(video_mode.refresh_rate)));
+        const int32_t vblank_override_hz = REXCVAR_GET(vblank_frequency_override);
+        if (vblank_override_hz > 0) {
+          refresh_rate_hz = double(vblank_override_hz);
+        }
         uint64_t guest_tick_frequency = chrono::Clock::guest_tick_frequency();
         uint64_t vsync_interval_ticks =
             std::max(uint64_t(1), uint64_t(double(guest_tick_frequency) / refresh_rate_hz));
