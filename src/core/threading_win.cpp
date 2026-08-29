@@ -93,12 +93,44 @@ void SyncMemory() {
   MemoryBarrier();
 }
 
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+
+// ::Sleep is quantized to the system timer interval (up to ~16ms; SDL's
+// timeBeginPeriod is disabled by the audio driver), which breaks guest pacing
+// that needs millisecond cadence — the vblank worker and WAIT_REG_MEM waits
+// at high vblank_frequency_override values. A per-thread high-resolution
+// waitable timer (Windows 10 1803+) keeps sub-millisecond accuracy; creation
+// failure falls back to the quantized path.
+namespace {
+struct HighResSleepTimer {
+  HANDLE handle = CreateWaitableTimerExW(
+      nullptr, nullptr, CREATE_WAITABLE_TIMER_MANUAL_RESET | CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+      TIMER_ALL_ACCESS);
+  ~HighResSleepTimer() {
+    if (handle) {
+      CloseHandle(handle);
+    }
+  }
+};
+}  // namespace
+
 void Sleep(std::chrono::microseconds duration) {
   if (duration.count() < 100) {
     MaybeYield();
-  } else {
-    ::Sleep(static_cast<DWORD>(duration.count() / 1000));
+    return;
   }
+  thread_local HighResSleepTimer hr_timer;
+  if (hr_timer.handle) {
+    LARGE_INTEGER due;
+    due.QuadPart = -static_cast<LONGLONG>(duration.count()) * 10;  // 100ns units, relative
+    if (SetWaitableTimer(hr_timer.handle, &due, 0, nullptr, nullptr, FALSE)) {
+      WaitForSingleObject(hr_timer.handle, INFINITE);
+      return;
+    }
+  }
+  ::Sleep(static_cast<DWORD>(duration.count() / 1000));
 }
 
 SleepResult AlertableSleep(std::chrono::microseconds duration) {
