@@ -38,6 +38,7 @@ class D3D12SharedMemory : public SharedMemory {
 
   ID3D12Resource* GetBuffer() const { return buffer_; }
   D3D12_GPU_VIRTUAL_ADDRESS GetGPUAddress() const { return buffer_gpu_address_; }
+  ID3D12Resource* GetReadbackResolveHostBuffer() const { return readback_resolve_host_buffer_; }
 
   void CompletedSubmissionUpdated();
   void BeginSubmission();
@@ -58,6 +59,11 @@ class D3D12SharedMemory : public SharedMemory {
   }
   // Makes the buffer usable as a source for copy commands.
   void UseAsCopySource() { CommitUAVWritesAndTransitionBuffer(D3D12_RESOURCE_STATE_COPY_SOURCE); }
+  // Makes the guest-RAM alias usable as the destination of a resolve readback
+  // copy. No-op when the optional host import was unavailable.
+  void UseReadbackResolveHostAsCopyDestination() {
+    TransitionReadbackResolveHostBuffer(D3D12_RESOURCE_STATE_COPY_DEST);
+  }
   // Must be called when doing draws/dispatches modifying data within the shared
   // memory buffer as a UAV, to make sure that when UseForWriting is called the
   // next time, a UAV barrier will be done, and subsequent overlapping UAV
@@ -98,6 +104,16 @@ class D3D12SharedMemory : public SharedMemory {
   D3D12_RESOURCE_STATES buffer_state_ = D3D12_RESOURCE_STATE_COPY_DEST;
   bool buffer_uav_writes_commit_needed_ = false;
   void CommitUAVWritesAndTransitionBuffer(D3D12_RESOURCE_STATES new_state);
+
+  // Optional second buffer placed on a D3D12 heap imported from a dedicated
+  // view of guest physical RAM. Full resolve readback copies can target this
+  // directly, avoiding a readback heap and CPU memcpy after the queue wait.
+  void* readback_resolve_host_view_ = nullptr;
+  ID3D12Heap* readback_resolve_host_heap_ = nullptr;
+  ID3D12Resource* readback_resolve_host_buffer_ = nullptr;
+  D3D12_RESOURCE_STATES readback_resolve_host_buffer_state_ = D3D12_RESOURCE_STATE_COMMON;
+  bool TryInitializeReadbackResolveHostBuffer();
+  void TransitionReadbackResolveHostBuffer(D3D12_RESOURCE_STATES new_state);
 
   // Non-shader-visible buffer descriptor heap for faster binding (via copying
   // rather than creation).

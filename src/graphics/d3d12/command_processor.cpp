@@ -2951,6 +2951,7 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
   }
 
   bool is_scaled = texture_cache_->IsDrawResolutionScaled();
+  ReadbackResolveMode readback_mode = GetReadbackResolveMode(REXCVAR_GET(d3d12_readback_resolve));
   uint64_t resolve_key = MakeReadbackResolveKey(written_address, written_length);
   ReadbackBuffer& rb = readback_buffers_[resolve_key];
   // A key that keeps recurring within a few frames is a steady-state consumer;
@@ -2959,8 +2960,7 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
   // double-buffered consumers that alternate between two addresses and
   // therefore recur every other frame rather than every frame.
   constexpr uint64_t kAutoRecurMaxGapFrames = 4;
-  if (rb.last_used_frame != 0 &&
-      frame_current_ - rb.last_used_frame <= kAutoRecurMaxGapFrames) {
+  if (rb.last_used_frame != 0 && frame_current_ - rb.last_used_frame <= kAutoRecurMaxGapFrames) {
     ++rb.recur_streak;
   } else {
     rb.recur_streak = 0;
@@ -2968,8 +2968,7 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
   rb.last_used_frame = frame_current_;
   constexpr uint32_t kAutoSkipStreak = 3;
   bool auto_skip =
-      GetReadbackResolveMode(REXCVAR_GET(d3d12_readback_resolve)) == ReadbackResolveMode::kAuto &&
-      rb.recur_streak >= kAutoSkipStreak;
+      readback_mode == ReadbackResolveMode::kAuto && rb.recur_streak >= kAutoSkipStreak;
 
   // Windowed readback traffic stats (CP thread only): what does the resolve
   // stream actually look like — how many requests, distinct keys, skips, and
@@ -2991,7 +2990,8 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
       std::sort(sorted.begin(), sorted.end(),
                 [](const auto& a, const auto& b) { return a.second > b.second; });
       for (const auto& [key, count] : sorted) {
-        if (shown++ >= 3) break;
+        if (shown++ >= 3)
+          break;
         top += fmt::format(" [{:08X}+{:X}]x{}", uint32_t(key >> 32), uint32_t(key), count);
       }
       REXGPU_INFO(
@@ -3010,10 +3010,18 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
     return true;
   }
 
+  // Xenia Edge-style full + sync path: a second D3D12 buffer aliases guest
+  // physical RAM, so the GPU copy lands at the guest address directly. The
+  // existing readback-heap path remains the fallback if the optional import
+  // was disabled or unavailable.
+  ID3D12Resource* resolve_host_buffer = readback_mode == ReadbackResolveMode::kFull
+                                            ? shared_memory_->GetReadbackResolveHostBuffer()
+                                            : nullptr;
+  bool use_resolve_host_copy = resolve_host_buffer != nullptr;
   uint32_t write_index = rb.current_index;
   uint32_t size = AlignReadbackBufferSize(written_length);
 
-  if (size > rb.sizes[write_index]) {
+  if (!use_resolve_host_copy && size > rb.sizes[write_index]) {
     const ui::d3d12::D3D12Provider& provider = GetD3D12Provider();
     ID3D12Device* device = provider.GetDevice();
     D3D12_RESOURCE_DESC buffer_desc;
@@ -3041,9 +3049,14 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
     }
   }
 
-  if (!rb.buffers[write_index]) {
+  if (!use_resolve_host_copy && !rb.buffers[write_index]) {
     return true;
   }
+
+  ID3D12Resource* resolve_readback_destination =
+      use_resolve_host_copy ? resolve_host_buffer : rb.buffers[write_index];
+  uint64_t resolve_readback_destination_offset =
+      use_resolve_host_copy ? uint64_t(written_address) : 0;
 
   if (is_scaled) {
     if (!resolve_downscale_pipeline_ || !resolve_downscale_root_signature_) {
@@ -3158,8 +3171,12 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
     PushUAVBarrier(resolve_downscale_buffer_.Get());
     PushTransitionBarrier(resolve_downscale_buffer_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                           D3D12_RESOURCE_STATE_COPY_SOURCE);
+    if (use_resolve_host_copy) {
+      shared_memory_->UseReadbackResolveHostAsCopyDestination();
+    }
     SubmitBarriers();
-    deferred_command_list_.D3DCopyBufferRegion(rb.buffers[write_index], 0,
+    deferred_command_list_.D3DCopyBufferRegion(resolve_readback_destination,
+                                               resolve_readback_destination_offset,
                                                resolve_downscale_buffer_.Get(), 0, written_length);
     PushTransitionBarrier(resolve_downscale_buffer_.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE,
                           D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -3167,13 +3184,31 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
     SubmitBarriers();
   } else {
     shared_memory_->UseAsCopySource();
+    if (use_resolve_host_copy) {
+      shared_memory_->UseReadbackResolveHostAsCopyDestination();
+    }
     SubmitBarriers();
     ID3D12Resource* shared_memory_buffer = shared_memory_->GetBuffer();
-    deferred_command_list_.D3DCopyBufferRegion(rb.buffers[write_index], 0, shared_memory_buffer,
-                                               written_address, written_length);
+    deferred_command_list_.D3DCopyBufferRegion(
+        resolve_readback_destination, resolve_readback_destination_offset, shared_memory_buffer,
+        written_address, written_length);
   }
 
-  ReadbackResolveMode readback_mode = GetReadbackResolveMode(REXCVAR_GET(d3d12_readback_resolve));
+  if (use_resolve_host_copy) {
+    const auto wait_begin = std::chrono::steady_clock::now();
+    const bool wait_ok = AwaitAllQueueOperationsCompletion();
+    ++rb_stat_sync_waits_;
+    rb_stat_wait_us_ += uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
+                                     std::chrono::steady_clock::now() - wait_begin)
+                                     .count());
+    if (!wait_ok) {
+      REXGPU_WARN(
+          "Direct resolve host copy queue wait failed; subsequent resolves "
+          "will continue using the configured path");
+    }
+    return true;
+  }
+
   bool use_delayed_sync =
       readback_mode == ReadbackResolveMode::kFast || readback_mode == ReadbackResolveMode::kSome;
   uint32_t read_index = write_index;

@@ -24,6 +24,11 @@
 REXCVAR_DEFINE_BOOL(d3d12_tiled_shared_memory, true, "GPU/D3D12",
                     "Use tiled shared memory on D3D12")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_BOOL(d3d12_readback_resolve_host_copy, false, "GPU/D3D12",
+                    "Import guest physical RAM as a D3D12 copy destination so full resolve "
+                    "readback writes directly to guest RAM before waiting; falls back to the "
+                    "readback heap path if the import is unavailable")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 namespace rex::graphics::d3d12 {
 
@@ -138,6 +143,79 @@ bool D3D12SharedMemory::Initialize() {
       provider, rex::align(ui::d3d12::D3D12UploadBufferPool::kDefaultPageSize,
                            size_t(1) << page_size_log2()));
 
+  if (REXCVAR_GET(d3d12_readback_resolve_host_copy) && !TryInitializeReadbackResolveHostBuffer()) {
+    REXGPU_WARN(
+        "Shared memory: direct resolve host copy is unavailable; full "
+        "readback will use the existing readback heap fallback");
+  }
+
+  return true;
+}
+
+bool D3D12SharedMemory::TryInitializeReadbackResolveHostBuffer() {
+  const ui::d3d12::D3D12Provider& provider = command_processor_.GetD3D12Provider();
+  ID3D12Device* device = provider.GetDevice();
+
+  ID3D12Device3* device3 = nullptr;
+  if (FAILED(device->QueryInterface(IID_PPV_ARGS(&device3)))) {
+    REXGPU_INFO("Shared memory host import: ID3D12Device3 is unavailable");
+    return false;
+  }
+
+  D3D12_FEATURE_DATA_EXISTING_HEAPS existing_heaps = {};
+  if (FAILED(device3->CheckFeatureSupport(D3D12_FEATURE_EXISTING_HEAPS, &existing_heaps,
+                                          sizeof(existing_heaps))) ||
+      !existing_heaps.Supported) {
+    REXGPU_INFO("Shared memory host import: existing heaps are unsupported");
+    device3->Release();
+    return false;
+  }
+
+  // Use a dedicated view of the same file-mapping pages as guest physical RAM.
+  // D3D12 may manage protection on the imported view, while the guest CPU and
+  // write-watch continue using the original view with independent PTEs.
+  const size_t physical_offset = size_t(memory().physical_membase() - memory().virtual_membase());
+  void* view = rex::memory::MapFileView(memory().mapping_handle(), nullptr, kBufferSize,
+                                        rex::memory::PageAccess::kReadWrite, physical_offset);
+  if (!view) {
+    REXGPU_INFO("Shared memory host import: failed to map a dedicated guest RAM view");
+    device3->Release();
+    return false;
+  }
+
+  ID3D12Heap* heap = nullptr;
+  HRESULT hr = device3->OpenExistingHeapFromAddress(view, IID_PPV_ARGS(&heap));
+  device3->Release();
+  if (FAILED(hr)) {
+    REXGPU_INFO("Shared memory host import: OpenExistingHeapFromAddress failed (0x{:08X})",
+                static_cast<uint32_t>(hr));
+    rex::memory::UnmapFileView(memory().mapping_handle(), view, kBufferSize);
+    return false;
+  }
+
+  const D3D12_HEAP_DESC heap_desc = heap->GetDesc();
+  REXGPU_INFO("Shared memory host import: heap CPUPageProperty={} MemoryPool={} flags=0x{:X}",
+              uint32_t(heap_desc.Properties.CPUPageProperty),
+              uint32_t(heap_desc.Properties.MemoryPoolPreference), uint32_t(heap_desc.Flags));
+
+  D3D12_RESOURCE_DESC buffer_desc;
+  ui::d3d12::util::FillBufferResourceDesc(buffer_desc, kBufferSize,
+                                          D3D12_RESOURCE_FLAG_ALLOW_CROSS_ADAPTER);
+  readback_resolve_host_buffer_state_ = D3D12_RESOURCE_STATE_COMMON;
+  hr = device->CreatePlacedResource(heap, 0, &buffer_desc, readback_resolve_host_buffer_state_,
+                                    nullptr, IID_PPV_ARGS(&readback_resolve_host_buffer_));
+  if (FAILED(hr)) {
+    REXGPU_INFO("Shared memory host import: resolve buffer placement failed (0x{:08X})",
+                static_cast<uint32_t>(hr));
+    heap->Release();
+    rex::memory::UnmapFileView(memory().mapping_handle(), view, kBufferSize);
+    return false;
+  }
+
+  readback_resolve_host_buffer_->SetName(L"Resolve Readback Guest RAM Alias");
+  readback_resolve_host_heap_ = heap;
+  readback_resolve_host_view_ = view;
+  REXGPU_INFO("Shared memory: guest RAM host buffer for direct full resolve readback ready");
   return true;
 }
 
@@ -150,6 +228,16 @@ void D3D12SharedMemory::Shutdown(bool from_destructor) {
 
   // First free the buffer to detach it from the heaps.
   ui::d3d12::util::ReleaseAndNull(buffer_);
+
+  // Release the placed resource and imported heap before unmapping the view
+  // that backs them.
+  ui::d3d12::util::ReleaseAndNull(readback_resolve_host_buffer_);
+  ui::d3d12::util::ReleaseAndNull(readback_resolve_host_heap_);
+  if (readback_resolve_host_view_) {
+    rex::memory::UnmapFileView(memory().mapping_handle(), readback_resolve_host_view_, kBufferSize);
+    readback_resolve_host_view_ = nullptr;
+  }
+  readback_resolve_host_buffer_state_ = D3D12_RESOURCE_STATE_COMMON;
 
   for (ID3D12Heap* heap : buffer_tiled_heaps_) {
     heap->Release();
@@ -176,6 +264,18 @@ void D3D12SharedMemory::CompletedSubmissionUpdated() {
 void D3D12SharedMemory::BeginSubmission() {
   // ExecuteCommandLists is a full UAV barrier.
   buffer_uav_writes_commit_needed_ = false;
+  // Buffers decay to COMMON after ExecuteCommandLists. The imported host buffer
+  // may sit idle between full-readback resolves, so do not retain a stale state.
+  readback_resolve_host_buffer_state_ = D3D12_RESOURCE_STATE_COMMON;
+}
+
+void D3D12SharedMemory::TransitionReadbackResolveHostBuffer(D3D12_RESOURCE_STATES new_state) {
+  if (!readback_resolve_host_buffer_ || readback_resolve_host_buffer_state_ == new_state) {
+    return;
+  }
+  command_processor_.PushTransitionBarrier(readback_resolve_host_buffer_,
+                                           readback_resolve_host_buffer_state_, new_state);
+  readback_resolve_host_buffer_state_ = new_state;
 }
 
 void D3D12SharedMemory::CommitUAVWritesAndTransitionBuffer(D3D12_RESOURCE_STATES new_state) {

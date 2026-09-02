@@ -336,6 +336,10 @@ class Memory {
   // Full file name and path of the memory-mapped file backing all memory.
   const std::filesystem::path& file_name() const { return file_name_; }
 
+  // File mapping backing the guest address space. Graphics backends may map a
+  // dedicated view of the physical-memory portion for host-visible GPU heaps.
+  rex::memory::FileMappingHandle mapping_handle() const { return mapping_; }
+
   // Base address of virtual memory in the host address space.
   // This is often something like 0x100000000.
   inline uint8_t* virtual_membase() const { return virtual_membase_; }
