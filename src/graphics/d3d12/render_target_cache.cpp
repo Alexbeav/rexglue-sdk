@@ -1188,10 +1188,29 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
     return true;
   }
 
+  uint64_t trace_sequence;
+  if (AcquireRenderTargetLifecycleTraceEvent(trace_sequence)) {
+    uint32_t copy_edram_base, copy_edram_row_length, copy_edram_rows, copy_edram_pitch;
+    resolve_info.GetCopyEdramTileSpan(copy_edram_base, copy_edram_row_length, copy_edram_rows,
+                                      copy_edram_pitch);
+    REXGPU_INFO(
+        "[RT_TRACE #{}] resolve-begin path={} copy={} src={} edram_base={} edram_span={}x{} "
+        "edram_pitch={} dest_base={:08X} dest_extent={:08X}+{:X} rect={}x{} clear_color={} "
+        "clear_depth={}",
+        trace_sequence, GetPath() == Path::kHostRenderTargets ? "rtv" : "rov",
+        resolve_info.copy_dest_extent_length != 0,
+        resolve_info.IsCopyingDepth() ? "depth" : "color", copy_edram_base,
+        copy_edram_row_length, copy_edram_rows, copy_edram_pitch, resolve_info.copy_dest_base,
+        resolve_info.copy_dest_extent_start, resolve_info.copy_dest_extent_length,
+        resolve_info.coordinate_info.width_div_8 * 8, resolve_info.height_div_8 * 8,
+        resolve_info.IsClearingColor(), resolve_info.IsClearingDepth());
+  }
+
   DeferredCommandList& command_list = command_processor_.GetDeferredCommandList();
 
   // Copying.
   bool copied = false;
+  const char* copy_route = "none";
   if (resolve_info.copy_dest_extent_length) {
     draw_util::ResolveCopyShaderConstants copy_shader_constants;
     uint32_t copy_group_count_x, copy_group_count_y;
@@ -1209,11 +1228,14 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
               TryResolveCopyDirectly(resolve_info, copy_shader, draw_resolution_scaled);
           if (direct_resolved) {
             ++direct_resolve_success_count_;
+            copy_route = "host-direct";
           } else {
             ++direct_resolve_fallback_count_;
+            copy_route = "host-edram-fallback";
           }
         }
         if (!direct_resolved) {
+          copy_route = "host-edram-fallback";
           // Dump the current contents of the render targets owning the affected
           // range to edram_buffer_.
           uint32_t dump_base;
@@ -1226,6 +1248,9 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
             return false;
           }
         }
+      }
+      if (GetPath() == Path::kPixelShaderInterlock) {
+        copy_route = "rov-edram";
       }
 
       // Make sure there is memory to write to.
@@ -1332,6 +1357,7 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
     }
   } else {
     copied = true;
+    copy_route = "no-copy";
   }
 
   // Clearing.
@@ -1422,7 +1448,15 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
     cleared = true;
   }
 
-  return copied && cleared;
+  bool succeeded = copied && cleared;
+  if (AcquireRenderTargetLifecycleTraceEvent(trace_sequence)) {
+    REXGPU_INFO(
+        "[RT_TRACE #{}] resolve-end path={} route={} copied={} cleared={} success={} "
+        "written={:08X}+{:X}",
+        trace_sequence, GetPath() == Path::kHostRenderTargets ? "rtv" : "rov", copy_route,
+        copied, cleared, succeeded, written_address_out, written_length_out);
+  }
+  return succeeded;
 }
 
 bool D3D12RenderTargetCache::InitializeTraceSubmitDownloads() {

@@ -385,6 +385,16 @@ void RenderTargetCache::ClearCache() {
           continue;
         }
         if (used_render_targets.find(it->second->key()) == used_render_targets.end()) {
+          uint64_t trace_sequence;
+          if (AcquireRenderTargetLifecycleTraceEvent(trace_sequence)) {
+            RenderTargetKey key = it->second->key();
+            REXGPU_INFO(
+                "[RT_TRACE #{}] evict key={:08X} base={} pitch={} msaa={} depth={} format={} ({})",
+                trace_sequence, key.key, uint32_t(key.base_tiles), key.GetPitchTiles(),
+                uint32_t(1) << uint32_t(key.msaa_samples), uint32_t(key.is_depth),
+                uint32_t(key.resource_format),
+                key.GetFormatName());
+          }
           delete it->second;
           render_targets_.erase(it);
         }
@@ -1188,6 +1198,15 @@ RenderTargetCache::RenderTarget* RenderTargetCache::GetOrCreateRenderTarget(Rend
   RenderTarget* render_target;
   if (it_rt != render_targets_.end()) {
     render_target = it_rt->second;
+    uint64_t trace_sequence;
+    if (render_target && AcquireRenderTargetLifecycleTraceEvent(trace_sequence)) {
+      REXGPU_INFO(
+          "[RT_TRACE #{}] reuse key={:08X} base={} pitch={} msaa={} depth={} format={} ({})",
+          trace_sequence, key.key, uint32_t(key.base_tiles), key.GetPitchTiles(),
+          uint32_t(1) << uint32_t(key.msaa_samples), uint32_t(key.is_depth),
+          uint32_t(key.resource_format),
+          key.GetFormatName());
+    }
   } else {
     render_target = CreateRenderTarget(key);
     uint32_t width = key.GetWidth();
@@ -1199,6 +1218,16 @@ RenderTargetCache::RenderTarget* RenderTargetCache::GetOrCreateRenderTarget(Rend
           width, height, uint32_t(1) << uint32_t(key.msaa_samples),
           key.is_depth ? "depth" : "color", static_cast<uint32_t>(key.resource_format),
           static_cast<uint32_t>(key.base_tiles));
+      uint64_t trace_sequence;
+      if (AcquireRenderTargetLifecycleTraceEvent(trace_sequence)) {
+        REXGPU_INFO(
+            "[RT_TRACE #{}] create key={:08X} size={}x{} base={} pitch={} msaa={} depth={} "
+            "format={} ({})",
+            trace_sequence, key.key, width, height, uint32_t(key.base_tiles), key.GetPitchTiles(),
+            uint32_t(1) << uint32_t(key.msaa_samples), uint32_t(key.is_depth),
+            uint32_t(key.resource_format),
+            key.GetFormatName());
+      }
     } else {
       REXGPU_ERROR(
           "Failed to create a {}x{} {}xMSAA {} render target with guest format "

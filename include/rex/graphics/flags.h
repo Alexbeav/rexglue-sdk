@@ -43,6 +43,13 @@ REXCVAR_DECLARE(bool, native_2x_msaa);
 REXCVAR_DECLARE(bool, snorm16_render_target_full_range);
 REXCVAR_DECLARE(bool, mrt_edram_used_range_clamp_to_min);
 REXCVAR_DECLARE(bool, direct_host_resolve);
+REXCVAR_DECLARE(bool, render_target_lifecycle_trace);
+REXCVAR_DECLARE(uint32_t, render_target_lifecycle_trace_limit);
+
+// Returns false when tracing is disabled or the per-process event limit has
+// been reached. The returned sequence number makes events from the render
+// target cache, resolve path, and swap path easy to correlate in one log.
+bool AcquireRenderTargetLifecycleTraceEvent(uint64_t& sequence_out);
 
 // GPU Textures
 REXCVAR_DECLARE(bool, gpu_allow_invalid_fetch_constants);

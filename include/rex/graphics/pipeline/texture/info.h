@@ -126,6 +126,10 @@ struct FormatInfo {
   uint32_t block_width;
   uint32_t block_height;
   uint32_t bits_per_pixel;
+  // Bit width of each guest component (0 = not a fixed-point component).
+  uint8_t component_bits[4];
+  // Whether the format stores fixed-point (normalized on the host) values.
+  bool fixed;
 
   uint32_t bytes_per_block() const { return block_width * block_height * bits_per_pixel / 8; }
 

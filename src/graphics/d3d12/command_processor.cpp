@@ -1992,6 +1992,19 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
   bool swap_source_scaled = frontbuffer_width_unscaled && frontbuffer_height_unscaled &&
                             (source_width_scaled != frontbuffer_width_unscaled ||
                              source_height_scaled != frontbuffer_height_unscaled);
+  uint64_t trace_sequence;
+  if (AcquireRenderTargetLifecycleTraceEvent(trace_sequence)) {
+    REXGPU_INFO(
+        "[RT_TRACE #{}] swap path={} packet_ptr={:08X} packet={}x{} source={}x{} "
+        "source_unscaled={}x{} active={}x{} format={} resource_format={}",
+        trace_sequence,
+        render_target_cache_->GetPath() == RenderTargetCache::Path::kHostRenderTargets ? "rtv"
+                                                                                       : "rov",
+        frontbuffer_ptr, frontbuffer_width, frontbuffer_height, source_width_scaled,
+        source_height_scaled, frontbuffer_width_unscaled, frontbuffer_height_unscaled,
+        guest_output_width, guest_output_height, uint32_t(frontbuffer_format),
+        uint32_t(swap_texture_desc.Format));
+  }
   if (texture_cache_->IsDrawResolutionScaled() && !swap_source_scaled) {
     static bool draw_scale_swap_unscaled_logged = false;
     if (!draw_scale_swap_unscaled_logged) {
@@ -3999,6 +4012,11 @@ void D3D12CommandProcessor::UpdateSystemConstantValues(
     uint32_t texture_signs_mask = uint32_t(0b11111111) << texture_signs_shift;
     dirty |= (texture_signs_uint & texture_signs_mask) != texture_signs_shifted;
     texture_signs_uint = (texture_signs_uint & ~texture_signs_mask) | texture_signs_shifted;
+    uint32_t texture_integer_scale_bits =
+        texture_cache_->GetActiveIntegerScaleBits(texture_index);
+    dirty |= system_constants_.texture_integer_scale_bits[texture_index] !=
+             texture_integer_scale_bits;
+    system_constants_.texture_integer_scale_bits[texture_index] = texture_integer_scale_bits;
     textures_resolution_scaled |=
         uint32_t(texture_cache_->IsActiveTextureResolutionScaled(texture_index)) << texture_index;
   }

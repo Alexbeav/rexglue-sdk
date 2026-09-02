@@ -33,6 +33,9 @@ Latest SDK builds and releases are published on [GitHub Releases](https://github
 
 For quick start guide, full CLI reference, and config file options, see the [wiki](https://github.com/rexglue/rexglue-sdk/wiki).
 
+For bounded D3D12 render-target diagnostics, see
+[Render-target lifecycle tracing](docs/RENDER_TARGET_LIFECYCLE_TRACE.md).
+
 # **Disclaimer**
 ReXGlue is not affiliated with nor endorsed by Microsoft or Xbox. It is an independent project created for educational and development purposes. All trademarks and copyrights belong to their respective owners. 
 
