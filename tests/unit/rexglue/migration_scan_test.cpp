@@ -7,6 +7,7 @@
  */
 
 #include "rexglue/commands/migration_scan.h"
+#include "../test_temp_directory.h"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -23,8 +24,7 @@ namespace {
 struct TempProject {
   fs::path root;
   explicit TempProject(const std::string& tag = "migration_scan_test")
-      : root(fs::temp_directory_path() / tag) {
-    fs::remove_all(root);
+      : root(CreateUnitTestDirectory(tag)) {
     fs::create_directories(root / "generated");
   }
   ~TempProject() { fs::remove_all(root); }
@@ -34,14 +34,53 @@ struct TempProject {
     f << content;
   }
 
-  void writeFile(const fs::path& rel, const std::string& content) const {
+  void writeFile(const fs::path& rel, const std::string& content, bool binary = false) const {
     fs::create_directories((root / rel).parent_path());
-    std::ofstream f(root / rel);
+    std::ofstream f(root / rel, std::ios::out | (binary ? std::ios::binary : std::ios::openmode{}));
     f << content;
   }
 };
 
 }  // namespace
+
+TEST_CASE("MigrationScan: CRLF includes retain their line endings", "[rexglue][migration_scan]") {
+  TempProject tp;
+  tp.writeFile("src/main.cpp",
+               "#include \"generated/mygame_config.h\"\r\nint value = 7;\r\n", true);
+  auto entries = rexglue::cli::ScanSourceIncludeRewrites(tp.root, "mygame");
+  REQUIRE(entries.size() == 1u);
+  CHECK(entries[0].rendered_content ==
+        "#include \"generated/mygame_init.h\"\r\nint value = 7;\r\n");
+}
+
+TEST_CASE("MigrationScan: CRLF helper has no semantic drift", "[rexglue][migration_scan]") {
+  TempProject tp;
+  const auto rendered = rexglue::cli::RenderRexglueCmake("mygame", "0.8.0", "generated/default");
+  std::string crlf;
+  for (char c : rendered) {
+    if (c == '\n') crlf.push_back('\r');
+    crlf.push_back(c);
+  }
+  tp.writeFile("generated/rexglue.cmake", crlf, true);
+  CHECK(rexglue::cli::ScanSdkTemplateDrift(
+            tp.root, "mygame", "0.8.0", "generated/default").empty());
+}
+
+TEST_CASE("MigrationScan: manifest basename follows either path separator",
+          "[rexglue][migration_scan]") {
+  TempProject tp;
+  tp.writeFile("CMakeLists.txt",
+               "set(A \"${ROOT}/mygame_config.toml\")\n"
+               "set(B \"${ROOT}\\mygame_config.toml\")\n"
+               "set(C \"mygame_config.toml.bak\")\n", true);
+  auto entries = rexglue::cli::ScanCmakeReferences(
+      tp.root, "mygame_config.toml", "mygame_manifest.toml");
+  REQUIRE(entries.size() == 1u);
+  CHECK(entries[0].rendered_content ==
+        "set(A \"${ROOT}/mygame_manifest.toml\")\n"
+        "set(B \"${ROOT}\\mygame_manifest.toml\")\n"
+        "set(C \"mygame_config.toml.bak\")\n");
+}
 
 // ---------------------------------------------------------------------------
 // SDK template drift

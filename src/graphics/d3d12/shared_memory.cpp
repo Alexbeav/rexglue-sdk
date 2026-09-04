@@ -478,6 +478,8 @@ bool D3D12SharedMemory::UploadRanges(
     uint32_t upload_range_length = upload_range.second;
     trace_writer_.WriteMemoryRead(upload_range_start << page_size_log2(),
                                   upload_range_length << page_size_log2());
+    command_processor_.NoteSharedMemoryUploadRange(upload_range_start << page_size_log2(),
+                                                   upload_range_length << page_size_log2());
     while (upload_range_length != 0) {
       ID3D12Resource* upload_buffer;
       size_t upload_buffer_offset, upload_buffer_size;

@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <cmath>
 #include <cstdarg>
 #include <cstring>
 #include <sstream>
@@ -45,6 +46,32 @@ REXCVAR_DEFINE_BOOL(d3d12_readback_resolve, false, "GPU/D3D12",
 
 REXCVAR_DEFINE_BOOL(d3d12_submit_on_primary_buffer_end, true, "GPU/D3D12",
                     "Submit command list when PM4 primary buffer ends")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_BOOL(
+    d3d12_readback_resolve_defer_host_copy, false, "GPU/D3D12",
+    "Experimental: coalesce direct full-resolve host-copy waits until the next guest wait, "
+    "interrupt, or primary-command-buffer boundary")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_INT32(
+    d3d12_readback_resolve_defer_signal_mask, 15, "GPU/D3D12",
+    "Experimental: which guest-signal packets flush deferred resolve host copies, as a "
+    "bitmask: 1 EVENT_WRITE_SHD, 2 EVENT_WRITE_EXT, 4 EVENT_WRITE_ZPD, 8 MEM_WRITE")
+    .range(0, 15)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_BOOL(
+    d3d12_readback_resolve_defer_submit_early, false, "GPU/D3D12",
+    "Experimental: with deferred host copies, end the submission right after queuing "
+    "each resolve copy so the GPU starts it immediately, and wait only for that "
+    "submission's fence at the flush boundary instead of draining the whole queue")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_BOOL(
+    d3d12_frame_timing_telemetry, false, "GPU/D3D12",
+    "Experimental: log command-processor frame-time percentiles, draw and resolve counts, "
+    "and readback wait time every 300 guest swaps")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 namespace rex::graphics::d3d12 {
@@ -1915,9 +1942,125 @@ void D3D12CommandProcessor::OnGammaRampPWLValueWritten() {
   gamma_ramp_pwl_up_to_date_ = false;
 }
 
+void D3D12CommandProcessor::PrepareForWait() {
+  CommandProcessor::PrepareForWait();
+  FlushDeferredReadbackResolveHostCopies(DeferredFlushBoundary::kGuestWait);
+}
+
+bool D3D12CommandProcessor::PrepareForGuestMemoryRead() {
+  return FlushDeferredReadbackResolveHostCopies(DeferredFlushBoundary::kGuestWait);
+}
+
+void D3D12CommandProcessor::PrepareForInterrupt() {
+  FlushDeferredReadbackResolveHostCopies(DeferredFlushBoundary::kInterrupt);
+}
+
+void D3D12CommandProcessor::PrepareForGuestSignalWrite(GuestSignalPacket packet) {
+  ++rb_stat_signal_writes_;
+  ++rb_stat_signal_writes_by_packet_[uint32_t(packet)];
+  if (!((uint32_t(REXCVAR_GET(d3d12_readback_resolve_defer_signal_mask)) >>
+         uint32_t(packet)) & 1u)) {
+    return;
+  }
+  if (readback_resolve_host_copy_pending_) {
+    ++rb_stat_signal_flushes_by_packet_[uint32_t(packet)];
+  }
+  FlushDeferredReadbackResolveHostCopies(DeferredFlushBoundary::kGuestSignalWrite);
+}
+
+void D3D12CommandProcessor::NoteSharedMemoryUploadRange(uint32_t start, uint32_t length) {
+  if (!readback_resolve_host_copy_pending_ || !length) {
+    return;
+  }
+  const uint64_t end = uint64_t(start) + length;
+  for (const auto& [pending_start, pending_length] :
+       readback_resolve_host_copy_pending_ranges_) {
+    if (start < uint64_t(pending_start) + pending_length && pending_start < end) {
+      ++rb_stat_upload_overlaps_;
+      return;
+    }
+  }
+}
+
 void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
                                       uint32_t frontbuffer_height) {
   SCOPE_profile_cpu_f("gpu");
+  if (REXCVAR_GET(d3d12_frame_timing_telemetry)) {
+    const uint64_t now_ns = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                         std::chrono::steady_clock::now().time_since_epoch())
+                                         .count());
+    if (frame_timing_last_swap_ns_) {
+      frame_timing_samples_.push_back(
+          {double(now_ns - frame_timing_last_swap_ns_) / 1000000.0, frame_timing_draws_,
+           frame_timing_resolves_, frame_timing_waits_, double(frame_timing_wait_us_) / 1000.0});
+    }
+    frame_timing_last_swap_ns_ = now_ns;
+    frame_timing_draws_ = frame_timing_resolves_ = frame_timing_waits_ = 0;
+    frame_timing_wait_us_ = 0;
+    if (frame_timing_samples_.size() >= 300) {
+      auto percentile = [](std::vector<double> values, double fraction) {
+        std::sort(values.begin(), values.end());
+        const size_t index = size_t(fraction * double(values.size() - 1));
+        return values[index];
+      };
+      auto correlation = [](const std::vector<double>& a, const std::vector<double>& b) {
+        double mean_a = 0.0, mean_b = 0.0;
+        for (size_t i = 0; i < a.size(); ++i) {
+          mean_a += a[i];
+          mean_b += b[i];
+        }
+        mean_a /= double(a.size());
+        mean_b /= double(b.size());
+        double covariance = 0.0, variance_a = 0.0, variance_b = 0.0;
+        for (size_t i = 0; i < a.size(); ++i) {
+          const double delta_a = a[i] - mean_a;
+          const double delta_b = b[i] - mean_b;
+          covariance += delta_a * delta_b;
+          variance_a += delta_a * delta_a;
+          variance_b += delta_b * delta_b;
+        }
+        const double denominator = std::sqrt(variance_a * variance_b);
+        return denominator > 0.0 ? covariance / denominator : 0.0;
+      };
+      std::vector<double> intervals, draws, resolves, waits, wait_ms, non_wait_ms;
+      intervals.reserve(frame_timing_samples_.size());
+      draws.reserve(frame_timing_samples_.size());
+      resolves.reserve(frame_timing_samples_.size());
+      waits.reserve(frame_timing_samples_.size());
+      wait_ms.reserve(frame_timing_samples_.size());
+      non_wait_ms.reserve(frame_timing_samples_.size());
+      double interval_sum = 0.0;
+      for (const FrameTimingSample& sample : frame_timing_samples_) {
+        intervals.push_back(sample.interval_ms);
+        draws.push_back(double(sample.draws));
+        resolves.push_back(double(sample.resolves));
+        waits.push_back(double(sample.waits));
+        wait_ms.push_back(sample.wait_ms);
+        non_wait_ms.push_back(std::max(0.0, sample.interval_ms - sample.wait_ms));
+        interval_sum += sample.interval_ms;
+      }
+      REXGPU_INFO(
+          "frame timing/300 swaps: {:.1f} fps mean; interval ms p50 {:.2f} p90 {:.2f} p99 "
+          "{:.2f} max {:.2f}; non-wait ms p50 {:.2f} p90 {:.2f} p99 {:.2f}; wait ms p50 "
+          "{:.2f} p90 {:.2f} p99 {:.2f}; draws p50 {:.0f} p90 {:.0f} (interval corr {:+.2f}); "
+          "resolves p50 {:.0f} p90 {:.0f} (corr {:+.2f}); waits p50 {:.0f} p90 {:.0f} "
+          "(corr {:+.2f})",
+          300000.0 / interval_sum, percentile(intervals, 0.50), percentile(intervals, 0.90),
+          percentile(intervals, 0.99), *std::max_element(intervals.begin(), intervals.end()),
+          percentile(non_wait_ms, 0.50), percentile(non_wait_ms, 0.90),
+          percentile(non_wait_ms, 0.99), percentile(wait_ms, 0.50),
+          percentile(wait_ms, 0.90), percentile(wait_ms, 0.99), percentile(draws, 0.50),
+          percentile(draws, 0.90), correlation(intervals, draws), percentile(resolves, 0.50),
+          percentile(resolves, 0.90), correlation(intervals, resolves), percentile(waits, 0.50),
+          percentile(waits, 0.90), correlation(intervals, waits));
+      frame_timing_samples_.clear();
+    }
+  } else {
+    frame_timing_last_swap_ns_ = 0;
+    frame_timing_draws_ = frame_timing_resolves_ = frame_timing_waits_ = 0;
+    frame_timing_wait_us_ = 0;
+    frame_timing_samples_.clear();
+  }
   vertex_buffers_in_sync_[0] = 0;
   vertex_buffers_in_sync_[1] = 0;
 
@@ -2294,6 +2437,7 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
 }
 
 void D3D12CommandProcessor::OnPrimaryBufferEnd() {
+  FlushDeferredReadbackResolveHostCopies(DeferredFlushBoundary::kPrimaryBufferEnd);
   if (REXCVAR_GET(d3d12_submit_on_primary_buffer_end) && submission_open_ &&
       CanEndSubmissionImmediately()) {
     EndSubmission(false);
@@ -2311,6 +2455,8 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
 #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
   SCOPE_profile_cpu_f("gpu");
 #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
+
+  ++frame_timing_draws_;
 
   ID3D12Device* device = GetD3D12Provider().GetDevice();
   const RegisterFile& regs = *register_file_;
@@ -2944,6 +3090,7 @@ bool D3D12CommandProcessor::IssueCopy() {
 }
 
 bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
+  ++frame_timing_resolves_;
   uint32_t written_address, written_length;
   if (!render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_, written_address,
                                      written_length)) {
@@ -3009,10 +3156,38 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
       }
       REXGPU_INFO(
           "readback stats/300f: {} requests, {} keys, {} auto-skips, {} sync waits, {} ms "
-          "waiting; top:{}",
+          "waiting, {} deferred host copies, {} boundary waits (wait {}, irq {}, pbuf {}, "
+          "signal {}), {} signal writes, {} upload overlaps; signal flushes/writes by packet "
+          "shd {}/{} ext {}/{} zpd {}/{} mem {}/{}; early submits {}, targeted waits {} "
+          "({} free), full drains {}; top:{}",
           rb_stat_requests_, rb_stat_key_counts_.size(), rb_stat_skips_, rb_stat_sync_waits_,
-          rb_stat_wait_us_ / 1000, top);
+          rb_stat_wait_us_ / 1000, rb_stat_deferred_host_copies_, rb_stat_boundary_waits_,
+          rb_stat_boundary_waits_by_kind_[uint32_t(DeferredFlushBoundary::kGuestWait)],
+          rb_stat_boundary_waits_by_kind_[uint32_t(DeferredFlushBoundary::kInterrupt)],
+          rb_stat_boundary_waits_by_kind_[uint32_t(DeferredFlushBoundary::kPrimaryBufferEnd)],
+          rb_stat_boundary_waits_by_kind_[uint32_t(DeferredFlushBoundary::kGuestSignalWrite)],
+          rb_stat_signal_writes_, rb_stat_upload_overlaps_,
+          rb_stat_signal_flushes_by_packet_[uint32_t(GuestSignalPacket::kEventWriteShd)],
+          rb_stat_signal_writes_by_packet_[uint32_t(GuestSignalPacket::kEventWriteShd)],
+          rb_stat_signal_flushes_by_packet_[uint32_t(GuestSignalPacket::kEventWriteExt)],
+          rb_stat_signal_writes_by_packet_[uint32_t(GuestSignalPacket::kEventWriteExt)],
+          rb_stat_signal_flushes_by_packet_[uint32_t(GuestSignalPacket::kEventWriteZpd)],
+          rb_stat_signal_writes_by_packet_[uint32_t(GuestSignalPacket::kEventWriteZpd)],
+          rb_stat_signal_flushes_by_packet_[uint32_t(GuestSignalPacket::kMemWrite)],
+          rb_stat_signal_writes_by_packet_[uint32_t(GuestSignalPacket::kMemWrite)],
+          rb_stat_early_submits_, rb_stat_targeted_waits_, rb_stat_targeted_waits_free_,
+          rb_stat_full_drains_, top);
       rb_stat_requests_ = rb_stat_skips_ = rb_stat_sync_waits_ = 0;
+      rb_stat_deferred_host_copies_ = rb_stat_boundary_waits_ = 0;
+      std::fill(std::begin(rb_stat_boundary_waits_by_kind_),
+                std::end(rb_stat_boundary_waits_by_kind_), 0u);
+      rb_stat_upload_overlaps_ = rb_stat_signal_writes_ = 0;
+      std::fill(std::begin(rb_stat_signal_writes_by_packet_),
+                std::end(rb_stat_signal_writes_by_packet_), 0u);
+      std::fill(std::begin(rb_stat_signal_flushes_by_packet_),
+                std::end(rb_stat_signal_flushes_by_packet_), 0u);
+      rb_stat_early_submits_ = rb_stat_targeted_waits_ = rb_stat_targeted_waits_free_ = 0;
+      rb_stat_full_drains_ = 0;
       rb_stat_wait_us_ = 0;
       rb_stat_key_counts_.clear();
       rb_stat_window_start_frame_ = frame_current_;
@@ -3208,12 +3383,33 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
   }
 
   if (use_resolve_host_copy) {
+    if (REXCVAR_GET(d3d12_readback_resolve_defer_host_copy)) {
+      readback_resolve_host_copy_pending_ = true;
+      readback_resolve_host_copy_pending_ranges_.emplace_back(written_address,
+                                                              written_length);
+      ++rb_stat_deferred_host_copies_;
+      // Submit-early: hand the copy to the GPU now so the flush boundary can
+      // wait on this submission alone while later work keeps queuing.
+      if (REXCVAR_GET(d3d12_readback_resolve_defer_submit_early) && submission_open_ &&
+          CanEndSubmissionImmediately() && EndSubmission(false)) {
+        readback_resolve_host_copy_pending_submission_ = submission_current_ - 1;
+        readback_resolve_host_copy_pending_open_ = false;
+        ++rb_stat_early_submits_;
+      } else {
+        readback_resolve_host_copy_pending_open_ = true;
+      }
+      return true;
+    }
+    readback_resolve_host_copy_pending_ = false;
     const auto wait_begin = std::chrono::steady_clock::now();
     const bool wait_ok = AwaitAllQueueOperationsCompletion();
     ++rb_stat_sync_waits_;
-    rb_stat_wait_us_ += uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
-                                     std::chrono::steady_clock::now() - wait_begin)
-                                     .count());
+    const uint64_t wait_us = uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
+                                          std::chrono::steady_clock::now() - wait_begin)
+                                          .count());
+    rb_stat_wait_us_ += wait_us;
+    frame_timing_wait_us_ += wait_us;
+    ++frame_timing_waits_;
     if (!wait_ok) {
       REXGPU_WARN(
           "Direct resolve host copy queue wait failed; subsequent resolves "
@@ -3231,9 +3427,12 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
     const auto wait_begin = std::chrono::steady_clock::now();
     const bool wait_ok = AwaitAllQueueOperationsCompletion();
     ++rb_stat_sync_waits_;
-    rb_stat_wait_us_ += uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
-                                     std::chrono::steady_clock::now() - wait_begin)
-                                     .count());
+    const uint64_t wait_us = uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
+                                          std::chrono::steady_clock::now() - wait_begin)
+                                          .count());
+    rb_stat_wait_us_ += wait_us;
+    frame_timing_wait_us_ += wait_us;
+    ++frame_timing_waits_;
     if (!wait_ok) {
       return true;
     }
@@ -3247,9 +3446,12 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
     const auto wait_begin = std::chrono::steady_clock::now();
     const bool wait_ok = AwaitAllQueueOperationsCompletion();
     ++rb_stat_sync_waits_;
-    rb_stat_wait_us_ += uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
-                                     std::chrono::steady_clock::now() - wait_begin)
-                                     .count());
+    const uint64_t wait_us = uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
+                                          std::chrono::steady_clock::now() - wait_begin)
+                                          .count());
+    rb_stat_wait_us_ += wait_us;
+    frame_timing_wait_us_ += wait_us;
+    ++frame_timing_waits_;
     if (!wait_ok) {
       return true;
     }
@@ -3266,6 +3468,53 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
 
   rb.current_index = 1 - rb.current_index;
   return true;
+}
+
+bool D3D12CommandProcessor::FlushDeferredReadbackResolveHostCopies(
+    DeferredFlushBoundary boundary) {
+  if (!readback_resolve_host_copy_pending_) {
+    return true;
+  }
+  const auto wait_begin = std::chrono::steady_clock::now();
+  bool wait_ok;
+  if (!readback_resolve_host_copy_pending_open_ &&
+      readback_resolve_host_copy_pending_submission_ != 0 &&
+      readback_resolve_host_copy_pending_submission_ < submission_current_) {
+    // Every pending copy lives in an already-ended submission: wait for that
+    // fence only, leaving the open submission (and the GPU queue behind it)
+    // untouched.
+    const uint64_t target = readback_resolve_host_copy_pending_submission_;
+    const bool already_done = submission_fence_->GetCompletedValue() >= target;
+    CheckSubmissionFence(target);
+    wait_ok = submission_completed_ >= target;
+    ++rb_stat_targeted_waits_;
+    if (already_done) {
+      ++rb_stat_targeted_waits_free_;
+    }
+  } else {
+    wait_ok = AwaitAllQueueOperationsCompletion();
+    ++rb_stat_full_drains_;
+  }
+  ++rb_stat_sync_waits_;
+  ++rb_stat_boundary_waits_;
+  ++rb_stat_boundary_waits_by_kind_[uint32_t(boundary)];
+  const uint64_t wait_us = uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
+                                        std::chrono::steady_clock::now() - wait_begin)
+                                        .count());
+  rb_stat_wait_us_ += wait_us;
+  frame_timing_wait_us_ += wait_us;
+  ++frame_timing_waits_;
+  if (!wait_ok) {
+    REXGPU_WARN("Deferred resolve host-copy boundary wait failed");
+  } else {
+    // A failed wait must remain pending so a later poll cannot treat stale
+    // guest RAM as a completed dependency.
+    readback_resolve_host_copy_pending_ = false;
+    readback_resolve_host_copy_pending_ranges_.clear();
+    readback_resolve_host_copy_pending_submission_ = 0;
+    readback_resolve_host_copy_pending_open_ = false;
+  }
+  return wait_ok;
 }
 
 void D3D12CommandProcessor::CheckSubmissionFence(uint64_t await_submission) {

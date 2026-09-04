@@ -87,6 +87,18 @@ bool IsPathTokenChar(char c) {
   return std::isalnum(uc) != 0 || c == '_' || c == '-' || c == '.' || c == '/' || c == '\\';
 }
 
+std::string NormalizeCrlf(std::string_view text) {
+  std::string result;
+  result.reserve(text.size());
+  for (size_t i = 0; i < text.size(); ++i) {
+    if (text[i] == '\r' && i + 1 < text.size() && text[i + 1] == '\n') {
+      continue;
+    }
+    result.push_back(text[i]);
+  }
+  return result;
+}
+
 bool ReplaceAllPathTokens(std::string& haystack, std::string_view needle,
                           std::string_view replacement) {
   if (needle.empty())
@@ -94,7 +106,8 @@ bool ReplaceAllPathTokens(std::string& haystack, std::string_view needle,
   bool replaced = false;
   std::string::size_type pos = 0;
   while ((pos = haystack.find(needle, pos)) != std::string::npos) {
-    bool boundary_before = pos == 0 || !IsPathTokenChar(haystack[pos - 1]);
+    bool boundary_before = pos == 0 || !IsPathTokenChar(haystack[pos - 1]) ||
+                           haystack[pos - 1] == '/' || haystack[pos - 1] == '\\';
     bool boundary_after =
         pos + needle.size() >= haystack.size() || !IsPathTokenChar(haystack[pos + needle.size()]);
     if (!boundary_before || !boundary_after) {
@@ -332,7 +345,7 @@ std::vector<OverwriteEntry> ScanSdkTemplateDrift(const fs::path& project_root,
   fs::path rexglue_cmake = project_root / "generated" / "rexglue.cmake";
   std::string rendered = RenderRexglueCmake(project_name, sdk_version, entrypoint_out_dir);
   std::string on_disk = fs::exists(rexglue_cmake) ? read_file(rexglue_cmake) : std::string{};
-  if (rendered != on_disk) {
+  if (NormalizeCrlf(rendered) != NormalizeCrlf(on_disk)) {
     plan.push_back({rexglue_cmake, std::move(rendered), OverwriteAction::Write, /*silent=*/true,
                     fmt::format("regenerate SDK helper for v{}", sdk_version)});
   }
@@ -370,7 +383,9 @@ std::vector<OverwriteEntry> ScanSourceIncludeRewrites(const fs::path& project_ro
   std::string new_basename = names.snake_case + "_init.h";
   std::string new_basename_lc = ToLower(new_basename);
 
-  static const std::regex include_re(R"(^(\s*#\s*include\s*[<"])([^>"]+)([>"].*)$)");
+  // A binary-read CRLF line retains its trailing CR. ECMAScript '.' does
+  // not match that character, so explicitly accept everything except LF.
+  static const std::regex include_re(R"(^(\s*#\s*include\s*[<"])([^>"]+)([>"][^\n]*)$)");
   auto extract_target = [&](const std::string& line) -> std::optional<std::string> {
     std::smatch m;
     if (!std::regex_search(line, m, include_re))

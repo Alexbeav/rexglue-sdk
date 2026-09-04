@@ -185,7 +185,23 @@ class CommandProcessor {
 
   virtual void MakeCoherent();
   virtual void PrepareForWait();
+  // Finish deferred writes before the first guest-memory wait poll, including
+  // short waits and values that would match only because memory is stale.
+  virtual bool PrepareForGuestMemoryRead() { return true; }
   virtual void ReturnFromWait();
+  virtual void PrepareForInterrupt() {}
+  // Called before a PM4 packet stores a guest-visible signal (fence value,
+  // event extents, sample counts, MEM_WRITE data) to guest memory. Backends
+  // that defer GPU->guest-RAM copies must land them here, because the guest
+  // CPU treats such a write as proof that earlier GPU work is complete.
+  enum class GuestSignalPacket : uint32_t {
+    kEventWriteShd,
+    kEventWriteExt,
+    kEventWriteZpd,
+    kMemWrite,
+    kCount,
+  };
+  virtual void PrepareForGuestSignalWrite(GuestSignalPacket packet) {}
 
   uint32_t ExecutePrimaryBuffer(uint32_t start_index, uint32_t end_index);
   virtual void OnPrimaryBufferEnd() {}

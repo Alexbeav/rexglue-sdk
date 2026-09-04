@@ -12,7 +12,10 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <chrono>
+#include <mutex>
 #include <utility>
+#include <vector>
 
 #include <rex/assert.h>
 #include <rex/cvar.h>
@@ -85,8 +88,86 @@ REXCVAR_DEFINE_BOOL(present_allow_overscan_cutoff, false, "UI/Presenter",
                     "Allow overscan cutoff based on safe area settings")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
+REXCVAR_DEFINE_BOOL(
+    present_frame_timing_telemetry, false, "UI/Presenter",
+    "Experimental: compare guest-output refresh cadence with successful host-present cadence "
+    "every 300 guest refreshes")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 namespace {
 using GuestOutputPaintConfig = rex::ui::Presenter::GuestOutputPaintConfig;
+
+struct PresenterFrameTimingState {
+  std::mutex mutex;
+  uint64_t last_guest_ns = 0;
+  uint64_t last_host_ns = 0;
+  std::vector<double> guest_intervals_ms;
+  std::vector<double> host_intervals_ms;
+  uint32_t host_immediate_presents = 0;
+  uint32_t host_ui_presents = 0;
+};
+
+PresenterFrameTimingState presenter_frame_timing_state;
+
+void RecordPresenterFrameTiming(bool host_present, bool host_ui_path = false) {
+  if (!REXCVAR_GET(present_frame_timing_telemetry)) {
+    return;
+  }
+  const uint64_t now_ns = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                       std::chrono::steady_clock::now().time_since_epoch())
+                                       .count());
+  std::lock_guard<std::mutex> lock(presenter_frame_timing_state.mutex);
+  PresenterFrameTimingState& state = presenter_frame_timing_state;
+  if (host_present) {
+    if (state.last_host_ns) {
+      state.host_intervals_ms.push_back(double(now_ns - state.last_host_ns) / 1000000.0);
+    }
+    state.last_host_ns = now_ns;
+    if (host_ui_path) {
+      ++state.host_ui_presents;
+    } else {
+      ++state.host_immediate_presents;
+    }
+    return;
+  }
+  if (state.last_guest_ns) {
+    state.guest_intervals_ms.push_back(double(now_ns - state.last_guest_ns) / 1000000.0);
+  }
+  state.last_guest_ns = now_ns;
+  if (state.guest_intervals_ms.size() < 300) {
+    return;
+  }
+
+  auto percentile = [](std::vector<double> values, double fraction) {
+    if (values.empty()) {
+      return 0.0;
+    }
+    std::sort(values.begin(), values.end());
+    return values[size_t(fraction * double(values.size() - 1))];
+  };
+  auto mean_fps = [](const std::vector<double>& values) {
+    double sum = 0.0;
+    for (double value : values) {
+      sum += value;
+    }
+    return sum > 0.0 ? 1000.0 * double(values.size()) / sum : 0.0;
+  };
+  const auto guest = state.guest_intervals_ms;
+  const auto host = state.host_intervals_ms;
+  REXLOG_INFO(
+      "present timing/300 guest refreshes: guest {:.1f} fps, interval ms p50 {:.2f} p90 "
+      "{:.2f} p99 {:.2f} max {:.2f}; host {} intervals, {:.1f} fps, interval ms p50 {:.2f} "
+      "p90 {:.2f} p99 {:.2f} max {:.2f}; successful host presents immediate {} UI {}",
+      mean_fps(guest), percentile(guest, 0.50), percentile(guest, 0.90),
+      percentile(guest, 0.99), *std::max_element(guest.begin(), guest.end()), host.size(),
+      mean_fps(host), percentile(host, 0.50), percentile(host, 0.90), percentile(host, 0.99),
+      host.empty() ? 0.0 : *std::max_element(host.begin(), host.end()),
+      state.host_immediate_presents, state.host_ui_presents);
+  state.guest_intervals_ms.clear();
+  state.host_intervals_ms.clear();
+  state.host_immediate_presents = 0;
+  state.host_ui_presents = 0;
+}
 
 GuestOutputPaintConfig::Effect ParsePresentEffect(const std::string& effect_name) {
   std::string lowered = effect_name;
@@ -648,6 +729,7 @@ bool Presenter::RefreshGuestOutput(
 
   if (is_active) {
     guest_frame_stats_.RecordFrame();
+    RecordPresenterFrameTiming(false);
   }
 
   return is_active;
@@ -1502,6 +1584,9 @@ Presenter::PaintResult Presenter::PaintAndPresent(bool execute_ui_drawers) {
   assert_false(execute_ui_drawers && !is_in_ui_thread_paint_);
   assert_true(surface_paint_connection_state_ == SurfacePaintConnectionState::kConnectedPaintable);
   PaintResult result = PaintAndPresentImpl(execute_ui_drawers);
+  if (result == PaintResult::kPresented || result == PaintResult::kPresentedSuboptimal) {
+    RecordPresenterFrameTiming(true, execute_ui_drawers);
+  }
   switch (result) {
     case PaintResult::kPresented:
       surface_paint_connection_was_optimal_at_successful_paint_ = true;

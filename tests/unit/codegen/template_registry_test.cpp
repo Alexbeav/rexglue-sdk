@@ -8,6 +8,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <rex/codegen/template_registry.h>
+#include "../test_temp_directory.h"
 
 #include <filesystem>
 #include <fstream>
@@ -17,9 +18,7 @@ namespace fs = std::filesystem;
 
 // Helper to create a temp directory for test overrides
 static fs::path CreateTempDir() {
-  auto tmp = fs::temp_directory_path() / "rex_template_test";
-  fs::create_directories(tmp);
-  return tmp;
+  return CreateUnitTestDirectory("rex_template_test");
 }
 
 static void CleanupTempDir(const fs::path& dir) {
@@ -65,7 +64,11 @@ TEST_CASE("TemplateRegistry: render with simple CLI data", "[TemplateRegistry]")
   std::string json = R"({
     "names": {"snake_case": "test_app"},
     "sdk_version": "1.0.0",
+    "sdk_version_full": "1.0.0-test",
+    "generated_on": "2026-09-04T00:00:00Z",
     "include_stamp": false,
+    "game_root": "",
+    "modules": [],
     "xex_path": "assets/default.xex",
     "out_directory_path": "generated/default"
   })";
@@ -85,6 +88,8 @@ TEST_CASE("TemplateRegistry: render with codegen data", "[TemplateRegistry]") {
     "code_base": "0x82010000",
     "code_size": "0x100000",
     "rexcrt_heap": 1,
+    "has_dll_modules": false,
+    "is_dll": false,
     "config_flags": {},
     "functions": [],
     "imports": []
@@ -197,7 +202,11 @@ TEST_CASE("Template: manifest_toml emits sdk_version when include_stamp is true"
           "[TemplateRegistry][manifest]") {
   rex::codegen::TemplateRegistry registry;
   std::string json =
-      R"({"names": {"snake_case": "mygame", "pascal_case": "Mygame", "upper_case": "MYGAME"}, "sdk_version": "0.8.0", "include_stamp": true})";
+      R"({"names": {"snake_case": "mygame", "pascal_case": "Mygame", "upper_case": "MYGAME"},
+          "sdk_version": "0.8.0", "sdk_version_full": "0.8.0-test",
+          "generated_on": "2026-09-04T00:00:00Z", "include_stamp": true,
+          "game_root": "", "xex_path": "default.xex",
+          "out_directory_path": "generated", "modules": []})";
   std::string out = registry.render("init/manifest_toml", json);
   CHECK(out.find("sdk_version = \"0.8.0\"") != std::string::npos);
   CHECK(out.find("name = \"mygame\"") != std::string::npos);
@@ -207,7 +216,11 @@ TEST_CASE("Template: manifest_toml omits sdk_version when include_stamp is false
           "[TemplateRegistry][manifest]") {
   rex::codegen::TemplateRegistry registry;
   std::string json =
-      R"({"names": {"snake_case": "mygame", "pascal_case": "Mygame", "upper_case": "MYGAME"}, "sdk_version": "0.8.0", "include_stamp": false})";
+      R"({"names": {"snake_case": "mygame", "pascal_case": "Mygame", "upper_case": "MYGAME"},
+          "sdk_version": "0.8.0", "sdk_version_full": "0.8.0-test",
+          "generated_on": "2026-09-04T00:00:00Z", "include_stamp": false,
+          "game_root": "", "xex_path": "default.xex",
+          "out_directory_path": "generated", "modules": []})";
   std::string out = registry.render("init/manifest_toml", json);
   CHECK(out.find("sdk_version") == std::string::npos);
   CHECK(out.find("name = \"mygame\"") != std::string::npos);

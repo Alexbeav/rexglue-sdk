@@ -72,6 +72,9 @@ class D3D12CommandProcessor : public CommandProcessor {
     assert_true(submission_open_);
     return deferred_command_list_;
   }
+  // Shared memory reports each CPU->GPU upload range so overlaps with
+  // in-flight deferred resolve host copies are counted (observational).
+  void NoteSharedMemoryUploadRange(uint32_t start, uint32_t length);
 
   uint64_t GetCurrentSubmission() const { return submission_current_; }
   uint64_t GetCompletedSubmission() const { return submission_completed_; }
@@ -212,6 +215,10 @@ class D3D12CommandProcessor : public CommandProcessor {
 
   void OnGammaRamp256EntryTableValueWritten() override;
   void OnGammaRampPWLValueWritten() override;
+  void PrepareForWait() override;
+  bool PrepareForGuestMemoryRead() override;
+  void PrepareForInterrupt() override;
+  void PrepareForGuestSignalWrite(GuestSignalPacket packet) override;
 
   void IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
                  uint32_t frontbuffer_height) override;
@@ -374,6 +381,14 @@ class D3D12CommandProcessor : public CommandProcessor {
   bool UpdateBindings(const D3D12Shader* vertex_shader, const D3D12Shader* pixel_shader,
                       ID3D12RootSignature* root_signature, bool shared_memory_is_uav);
   bool IssueCopy_ReadbackResolvePath();
+  enum class DeferredFlushBoundary : uint32_t {
+    kGuestWait,
+    kInterrupt,
+    kPrimaryBufferEnd,
+    kGuestSignalWrite,
+    kCount,
+  };
+  bool FlushDeferredReadbackResolveHostCopies(DeferredFlushBoundary boundary);
   bool IssueDraw_MemexportReadbackFullPath(uint32_t total_size);
   bool IssueDraw_MemexportReadbackFastPath(uint32_t total_size);
 
@@ -397,8 +412,41 @@ class D3D12CommandProcessor : public CommandProcessor {
   uint32_t rb_stat_requests_ = 0;
   uint32_t rb_stat_skips_ = 0;
   uint32_t rb_stat_sync_waits_ = 0;
+  uint32_t rb_stat_deferred_host_copies_ = 0;
+  uint32_t rb_stat_boundary_waits_ = 0;
+  uint32_t rb_stat_boundary_waits_by_kind_[uint32_t(DeferredFlushBoundary::kCount)] = {};
+  uint32_t rb_stat_upload_overlaps_ = 0;
+  uint32_t rb_stat_signal_writes_ = 0;
+  uint32_t rb_stat_signal_writes_by_packet_[uint32_t(GuestSignalPacket::kCount)] = {};
+  uint32_t rb_stat_signal_flushes_by_packet_[uint32_t(GuestSignalPacket::kCount)] = {};
   uint64_t rb_stat_wait_us_ = 0;
   std::unordered_map<uint64_t, uint32_t> rb_stat_key_counts_;
+  bool readback_resolve_host_copy_pending_ = false;
+  // Guest physical ranges of resolve host copies queued but not yet awaited.
+  std::vector<std::pair<uint32_t, uint32_t>> readback_resolve_host_copy_pending_ranges_;
+  // Submit-early mode: index of the last ended submission that carries pending
+  // copies (0 = none), and whether any pending copy still sits in the open one.
+  uint64_t readback_resolve_host_copy_pending_submission_ = 0;
+  bool readback_resolve_host_copy_pending_open_ = false;
+  uint32_t rb_stat_early_submits_ = 0;
+  uint32_t rb_stat_targeted_waits_ = 0;
+  uint32_t rb_stat_targeted_waits_free_ = 0;
+  uint32_t rb_stat_full_drains_ = 0;
+  // Candidate B5 timing telemetry. Samples are delimited by guest swaps so
+  // they expose command-processor cadence instead of an averaged FPS value.
+  struct FrameTimingSample {
+    double interval_ms;
+    uint32_t draws;
+    uint32_t resolves;
+    uint32_t waits;
+    double wait_ms;
+  };
+  uint64_t frame_timing_last_swap_ns_ = 0;
+  uint32_t frame_timing_draws_ = 0;
+  uint32_t frame_timing_resolves_ = 0;
+  uint32_t frame_timing_waits_ = 0;
+  uint64_t frame_timing_wait_us_ = 0;
+  std::vector<FrameTimingSample> frame_timing_samples_;
   static constexpr uint32_t kReadbackBufferSizeIncrement = 16 * 1024 * 1024;
   static constexpr size_t kMaxReadbackBuffers = 256;
   static constexpr uint64_t kReadbackBufferEvictionAgeFrames = 60;
