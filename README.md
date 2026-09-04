@@ -36,6 +36,9 @@ For quick start guide, full CLI reference, and config file options, see the [wik
 For bounded D3D12 render-target diagnostics, see
 [Render-target lifecycle tracing](docs/RENDER_TARGET_LIFECYCLE_TRACE.md).
 
+For local SDK builds and tests with LLVM's Windows MSVC target, see
+[Windows validation](docs/WINDOWS_VALIDATION.md).
+
 # **Disclaimer**
 ReXGlue is not affiliated with nor endorsed by Microsoft or Xbox. It is an independent project created for educational and development purposes. All trademarks and copyrights belong to their respective owners. 
 
